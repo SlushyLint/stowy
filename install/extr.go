@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"stowy/internal/statusline"
+	"stowy/pkgarchive"
 
-	"github.com/klauspost/compress/zstd"
 	"golang.org/x/term"
 )
 
@@ -38,23 +38,11 @@ func Expkg(pkgname, archpath string) error {
 	}
 
 	// open pkg archive
-	f, e := os.Open(archpath)
+	tr, closeArchive, e := pkgarchive.Open(archpath)
 	if e != nil {
 		return fmt.Errorf("I/O: could not open %s\nSTDERR: %w\n", archpath, e)
 	}
-	defer f.Close()
-
-	// extract zstd data while its read.
-	// 'tr' will read tar entries
-	// from the decompressed stream
-	zr, e := zstd.NewReader(f)
-	if e != nil {
-		return fmt.Errorf("R: could not execute zstd reader for %v\nSTDERR: %w\n", f, e)
-	}
-	defer zr.Close()
-
-	// create tar reader
-	tr := tar.NewReader(zr) // pacman packages compress via tar AND zstd.
+	defer closeArchive()
 
 	type pendsymlink struct {
 		name   string
@@ -162,7 +150,7 @@ func Expkg(pkgname, archpath string) error {
 			return nil
 		}
 		if e != nil {
-			return fmt.Errorf("R: Error reading %v:\nSTDERR: %w", f, e)
+			return fmt.Errorf("R: Error reading %s:\nSTDERR: %w", archpath, e)
 		}
 
 		// skip pkg meta

@@ -100,9 +100,19 @@ func run() (exitCode int) {
 			return 2
 		}
 		repo := os.Args[2]
+		target, err := detectPackageTarget()
+		if err != nil {
+			statusline.LogfTo(os.Stderr, "E: %v", err)
+			return 1
+		}
+		if !target.supportsRepository(repo) {
+			statusline.LogfTo(os.Stderr, "E: repository %q is not available for %s", repo, target.name)
+			return 1
+		}
+		warnInsecureARMSource(target)
 		term := os.Args[3]
-		dburl := fmt.Sprintf("https://geo.mirror.pkgbuild.com/%s/os/x86_64/%s.db", repo, repo)
-		dbpath := repodbpath(repo)
+		dburl := target.repositoryDatabaseURL(repo)
+		dbpath := repodbpath(repo, target.packageArch)
 
 		ls("repo", "downloading %s database", repo)
 		if err := dlfile(context.Background(), dburl, dbpath); err != nil {
@@ -123,7 +133,7 @@ func run() (exitCode int) {
 
 	case "l":
 		if len(os.Args) != 3 {
-			statusline.LogfTo(os.Stderr, "E: usage: stowy l <package.tar.zst>")
+			statusline.LogfTo(os.Stderr, "E: usage: stowy l <package archive>")
 			return 2
 		}
 		ls("archive", "reading local package metadata from %s", os.Args[2])
@@ -133,7 +143,13 @@ func run() (exitCode int) {
 			return 1
 		}
 
-		if err := installPackage(pkg, "", os.Args[2], newInstallState()); err != nil {
+		target, err := detectPackageTarget()
+		if err != nil {
+			statusline.LogfTo(os.Stderr, "E: %v", err)
+			return 1
+		}
+		warnInsecureARMSource(target)
+		if err := installPackage(pkg, "", os.Args[2], newInstallState(), target); err != nil {
 			statusline.LogfTo(os.Stderr, "E: install %s: %v", pkg.Name, err)
 			return 1
 		}
@@ -156,13 +172,19 @@ func run() (exitCode int) {
 		}
 
 		term := os.Args[2]
-		repos := []string{"core", "extra", "multilib"}
+		target, err := detectPackageTarget()
+		if err != nil {
+			statusline.LogfTo(os.Stderr, "E: %v", err)
+			return 1
+		}
+		warnInsecureARMSource(target)
+		repos := target.repositories
 
 		var pkg meta.Pkg
 		repo := ""
 
 		for _, candidateRepo := range repos {
-			dbpath, err := repoDatabase(candidateRepo)
+			dbpath, err := repoDatabase(candidateRepo, target)
 			if err != nil {
 				statusline.LogfTo(os.Stderr, "E: download database (%s): %v", candidateRepo, err)
 				return 1
@@ -175,7 +197,7 @@ func run() (exitCode int) {
 			}
 
 			for _, match := range matches {
-				if strings.EqualFold(term, match.Name) {
+				if strings.EqualFold(term, match.Name) && target.acceptsPackageArchitecture(match.Archbtw) {
 					pkg = match
 					repo = candidateRepo
 					break
@@ -194,7 +216,7 @@ func run() (exitCode int) {
 
 		ls("select", "selected %s %s from %s", pkg.Name, pkg.Ver, repo)
 
-		if err := installPackage(pkg, repo, "", newInstallState()); err != nil {
+		if err := installPackage(pkg, repo, "", newInstallState(), target); err != nil {
 			statusline.LogfTo(os.Stderr, "E: install package (%s): %v", pkg.Name, err)
 			return 1
 		}
@@ -260,11 +282,9 @@ func list(dir string) []string {
 	return obj
 }
 
-func depends(dev string) (meta.Pkg, string, error) {
-	repos := []string{"core", "extra", "multilib"}
-
-	for _, repo := range repos {
-		dbpath, err := repoDatabase(repo)
+func depends(dev string, target packageTarget) (meta.Pkg, string, error) {
+	for _, repo := range target.repositories {
+		dbpath, err := repoDatabase(repo, target)
 		if err != nil {
 			return meta.Pkg{}, "", err
 		}
@@ -273,7 +293,7 @@ func depends(dev string) (meta.Pkg, string, error) {
 			return meta.Pkg{}, "", err
 		}
 		for _, match := range matches {
-			if packageSatisfies(match, dev) {
+			if target.acceptsPackageArchitecture(match.Archbtw) && packageSatisfies(match, dev) {
 				return match, repo, nil
 			}
 		}
@@ -283,17 +303,21 @@ func depends(dev string) (meta.Pkg, string, error) {
 
 var loadedRepoDatabases = make(map[string]string)
 
-func repoDatabase(repo string) (string, error) {
-	if path, ok := loadedRepoDatabases[repo]; ok {
+func repoDatabase(repo string, target packageTarget) (string, error) {
+	if !target.supportsRepository(repo) {
+		return "", fmt.Errorf("repository %q is not available for %s", repo, target.name)
+	}
+	key := target.packageArch + "/" + repo
+	if path, ok := loadedRepoDatabases[key]; ok {
 		return path, nil
 	}
-	url := fmt.Sprintf("https://geo.mirror.pkgbuild.com/%s/os/x86_64/%s.db", repo, repo)
-	path := repodbpath(repo)
+	url := target.repositoryDatabaseURL(repo)
+	path := repodbpath(repo, target.packageArch)
 	ls("repo", "downloading %s repository database", repo)
 	if err := dlfile(context.Background(), url, path); err != nil {
 		return "", err
 	}
-	loadedRepoDatabases[repo] = path
+	loadedRepoDatabases[key] = path
 	return path, nil
 }
 
@@ -309,7 +333,7 @@ func newInstallState() *installState {
 	}
 }
 
-func installPackage(pkg meta.Pkg, repo, archivePath string, state *installState) error {
+func installPackage(pkg meta.Pkg, repo, archivePath string, state *installState, target packageTarget) error {
 	if state.installed[pkg.Name] {
 		return nil
 	}
@@ -323,7 +347,7 @@ func installPackage(pkg meta.Pkg, repo, archivePath string, state *installState)
 		if repo == "" {
 			return fmt.Errorf("no repository specified for package %q", pkg.Name)
 		}
-		url := fmt.Sprintf("https://geo.mirror.pkgbuild.com/%s/os/x86_64/%s", repo, pkg.Fname)
+		url := target.packageURL(repo, pkg.Fname)
 		archivePath = filepath.Join(os.TempDir(), filepath.Base(pkg.Fname))
 		ls("download", "fetching package archive from %s", url)
 		if err := dlfile(context.Background(), url, archivePath); err != nil {
@@ -336,6 +360,9 @@ func installPackage(pkg meta.Pkg, repo, archivePath string, state *installState)
 	if err != nil {
 		return fmt.Errorf("parse %s package metadata: %w", pkg.Name, err)
 	}
+	if !target.acceptsPackageArchitecture(packageInfo.Archbtw) {
+		return fmt.Errorf("package %q targets architecture %q, but this host requires %q", packageInfo.Name, packageInfo.Archbtw, target.packageArch)
+	}
 	if pkg.Name != "" && packageInfo.Name != pkg.Name {
 		return fmt.Errorf("archive package name %q does not match repository package %q", packageInfo.Name, pkg.Name)
 	}
@@ -343,11 +370,11 @@ func installPackage(pkg meta.Pkg, repo, archivePath string, state *installState)
 	//	fmt.Printf("Package %s depends on:\n", packageInfo.Name)
 	for _, requirement := range packageInfo.Depends {
 		//		fmt.Printf("\t%s\n", requirement)
-		dependency, dependencyRepo, err := depends(requirement)
+		dependency, dependencyRepo, err := depends(requirement, target)
 		if err != nil {
 			return fmt.Errorf("resolve dependency %q of %s: %w", requirement, packageInfo.Name, err)
 		}
-		if err := installPackage(dependency, dependencyRepo, "", state); err != nil {
+		if err := installPackage(dependency, dependencyRepo, "", state, target); err != nil {
 			return fmt.Errorf("install dependency %q of %s: %w", requirement, packageInfo.Name, err)
 		}
 	}
@@ -359,6 +386,13 @@ func installPackage(pkg meta.Pkg, repo, archivePath string, state *installState)
 	state.installed[pkg.Name] = true
 	return nil
 }
+
+func warnInsecureARMSource(target packageTarget) {
+	if target.armSource {
+		statusline.LogfTo(os.Stderr, "WARNING: ARM package metadata and archives use HTTP and are not signature-verified")
+	}
+}
+
 func cp(path string) error {
 	info, err := os.Stat(path)
 
