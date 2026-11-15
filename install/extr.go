@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/term"
 )
 
 // btw i use arch
@@ -26,8 +28,8 @@ func Expkg(pkgname, archpath string) error {
 
 	// create a directory for each individual package
 	pkgdir := filepath.Join(home, ".local", "stowy", "root")
-	logStep("extract", "extracting package archive %s", archpath)
-	logStep("extract", "writing package files to %s", pkgdir)
+	//	logStep("extract", "extracting package archive %s", archpath)
+	//	logStep("extract", "writing package files to %s", pkgdir)
 
 	if e := os.MkdirAll(pkgdir, 0o755); e != nil {
 		return fmt.Errorf("I/O: could not create directory %s of perms 755\nSTDERR: %w\n", pkgdir, e)
@@ -66,6 +68,10 @@ func Expkg(pkgname, archpath string) error {
 	var hardlinks []pendhardlink
 	var files []string
 	var dirs []string
+	progress := extractionProgress{
+		packageName: pkgname,
+		enabled:     term.IsTerminal(int(os.Stderr.Fd())),
+	}
 
 	// read every package entry
 	for {
@@ -89,6 +95,20 @@ func Expkg(pkgname, archpath string) error {
 						return fmt.Errorf("I/O: hard link target %q is not a regular file", src)
 					}
 					dst := filepath.Join(pkgdir, l.name)
+					dstInfo, err := os.Lstat(dst)
+					if err == nil {
+						if os.SameFile(info, dstInfo) {
+							continue
+						}
+						if dstInfo.IsDir() {
+							return fmt.Errorf("I/O: hard link destination %q is a directory", dst)
+						}
+						if err := os.Remove(dst); err != nil {
+							return fmt.Errorf("I/O: remove existing hard link destination %q: %w", dst, err)
+						}
+					} else if !os.IsNotExist(err) {
+						return fmt.Errorf("I/O: inspect hard link destination %q: %w", dst, err)
+					}
 					if err := os.Link(src, dst); err != nil {
 						return fmt.Errorf("I/O: create hard link %q to %q: %w", dst, src, err)
 					}
@@ -131,6 +151,7 @@ func Expkg(pkgname, archpath string) error {
 				return fmt.Errorf("I/O: could not correctly expose to path\nSTDERR: %w\n", e)
 			}
 			logStep("done", "package extraction complete")
+			progress.finish()
 			return nil
 		}
 		if e != nil {
@@ -191,7 +212,17 @@ func Expkg(pkgname, archpath string) error {
 			}
 			dirs = append(dirs, name)
 		case tar.TypeReg, tar.TypeRegA:
-			// regulr files should create copy with its contents
+			info, err := os.Lstat(targ)
+			if err == nil {
+				if info.IsDir() {
+					return fmt.Errorf("I/O: package file %q conflicts with an existing directory", targ)
+				}
+				if err := os.Remove(targ); err != nil {
+					return fmt.Errorf("I/O: remove existing package file %q: %w", targ, err)
+				}
+			} else if !os.IsNotExist(err) {
+				return fmt.Errorf("I/O: inspect package file %q: %w", targ, err)
+			}
 			out, e := os.OpenFile(targ, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
 			if e != nil {
 				return fmt.Errorf("I/o: could not create extracted files\nSTDERR: %w", e)
@@ -211,6 +242,7 @@ func Expkg(pkgname, archpath string) error {
 			return fmt.Errorf("E: %q has an unsupported archive entry of type %d\n", hdr.Name, hdr.Typeflag)
 
 		}
+		progress.step()
 
 	}
 
@@ -282,7 +314,7 @@ func expose(pkgdir string) error {
 		return fmt.Errorf("I/O: could not create cmd dir: %w", e)
 	}
 
-	logStep("link", "creating command links in %s", userbin)
+	//	logStep("link", "creating command links in %s", userbin)
 	for _, i := range entries {
 		src := filepath.Join(pkgbin, i.Name())
 		info, e := os.Stat(src)
@@ -342,7 +374,7 @@ func expose(pkgdir string) error {
 		}
 		logStep("link", "exposed command %s", link)
 	}
-	logStep("bin", "command directory is %s; if zsh cannot find a newly installed command, run: rehash", userbin)
+	//	logStep("bin", "command directory is %s; if zsh cannot find a newly installed command, run: rehash", userbin)
 	return nil
 
 }
@@ -377,4 +409,29 @@ func localSymlinkTarget(name, linkname string) (string, error) {
 	}
 
 	return filepath.Rel(filepath.Dir(name), target)
+}
+
+type extractionProgress struct {
+	packageName string
+	count       int
+	lastUpdate  time.Time
+	enabled     bool
+	shown       bool
+}
+
+func (p *extractionProgress) step() {
+	p.count++
+	if !p.enabled || time.Since(p.lastUpdate) < 100*time.Millisecond {
+		return
+	}
+
+	//	fmt.Fprintf(os.Stderr, "\rExtracting %s: %d items", p.packageName, p.count)
+	p.lastUpdate = time.Now()
+	p.shown = true
+}
+
+func (p *extractionProgress) finish() {
+	if p.shown {
+		fmt.Fprintf(os.Stderr, "\rExtracted %s: %d items\n", p.packageName, p.count)
+	}
 }

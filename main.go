@@ -315,9 +315,9 @@ func installPackage(pkg meta.Pkg, repo, archivePath string, state *installState)
 		return fmt.Errorf("archive package name %q does not match repository package %q", packageInfo.Name, pkg.Name)
 	}
 
-	fmt.Printf("Package %s depends on:\n", packageInfo.Name)
+	//	fmt.Printf("Package %s depends on:\n", packageInfo.Name)
 	for _, requirement := range packageInfo.Depends {
-		fmt.Printf("\t%s\n", requirement)
+		//		fmt.Printf("\t%s\n", requirement)
 		dependency, dependencyRepo, err := depends(requirement)
 		if err != nil {
 			return fmt.Errorf("resolve dependency %q of %s: %w", requirement, packageInfo.Name, err)

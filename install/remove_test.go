@@ -117,6 +117,67 @@ func TestExpkgExtractsHardlinks(t *testing.T) {
 	}
 }
 
+func TestExpkgReplacesExistingHardlinkDestination(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	archive := filepath.Join(t.TempDir(), "tzdata.pkg.tar.zst")
+	writeHardlinkTestPackage(t, archive, "usr/share/zoneinfo/Africa/Abidjan", "usr/share/zoneinfo/Africa/Accra", "zone data")
+
+	root := filepath.Join(home, ".local", "stowy", "root")
+	destination := filepath.Join(root, "usr/share/zoneinfo/Africa/Accra")
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, []byte("stale data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Expkg("tzdata", archive); err != nil {
+		t.Fatal(err)
+	}
+
+	sourceInfo, err := os.Stat(filepath.Join(root, "usr/share/zoneinfo/Africa/Abidjan"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationInfo, err := os.Stat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(sourceInfo, destinationInfo) {
+		t.Fatal("existing destination was not replaced by the package hard link")
+	}
+	if data, err := os.ReadFile(destination); err != nil || string(data) != "zone data" {
+		t.Fatalf("destination contents = %q, %v", data, err)
+	}
+}
+
+func TestExpkgReplacesReadOnlyExistingFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
+	writeTestPackage(t, archive, map[string]string{"usr/bin/demo": "new contents"})
+
+	root := filepath.Join(home, ".local", "stowy", "root")
+	path := filepath.Join(root, "usr/bin/demo")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("old contents"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o555); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Expkg("demo", archive); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "new contents" {
+		t.Fatalf("file contents = %q, %v", data, err)
+	}
+}
+
 func TestExpkgRejectsHardlinksOutsideInstallRoot(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
