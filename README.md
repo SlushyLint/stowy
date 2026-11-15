@@ -1,31 +1,29 @@
 # stowy
 
-`stowy` is a small, experimental Go tool for installing Arch Linux packages into a user-local prefix instead of writing to system-owned directories. It is designed as a learning project for understanding how package archives can be downloaded, extracted, and exposed from a home-directory layout without requiring `sudo`.
+`stowy` is a small, experimental Arch Linux package installer that keeps packages in a user-owned prefix instead of writing to system paths. It is intended as a learning project and local tool for exploring how package archives can be downloaded, extracted, and exposed from `~/.local` without requiring `sudo`.
 
-This is not a replacement for `pacman`, and it is not intended to be a hardened production package manager. It is a prototype for experimenting with user-space package installation patterns.
+This is not a replacement for `pacman`, and it is not a hardened production package manager. It is a compact prototype focused on user-space package experiments.
 
 ## What it does
 
-- Searches Arch repository databases by package name or description
-- Downloads repository metadata from Arch mirrors
-- Installs packages from Arch repositories or local `.pkg.tar.zst` archives
-- Extracts package contents into a managed prefix under `~/.local/stowy`
-- Exposes programs from that prefix via launchers placed in `~/.local/bin`
+- Searches official Arch repository databases by package name
+- Downloads repository metadata from a mirror
+- Installs packages from `core`, `extra`, and `multilib`
+- Installs local `.pkg.tar.zst` archives
+- Extracts package contents into `~/.local/stowy`
+- Creates helper launchers under `~/.local/bin`
 - Removes packages previously installed by `stowy`
-- Rejects unsafe archive entries and unsupported package paths
+- Rejects unsafe archive entries and unsupported package layout paths
 
-## Why this exists
+## Why this project exists
 
-The project explores a simple idea: keep package metadata and extracted files under a user-owned prefix, make binaries available on the `PATH`, and do it without modifying the root filesystem. That makes it useful for experiments, local tooling, and package-learning work outside of a full system package manager.
+The idea is simple: keep package metadata and extracted files under a user-owned prefix, expose the resulting binaries on `PATH`, and avoid modifying root-owned directories. It is useful for experimentation, learning, and local tooling where a full package manager would be overkill.
 
-## Project layout
+## Requirements
 
-- `main.go` — CLI entry point and command dispatch
-- `repo.go` — repo database download and retrieval logic
-- `search.go` — repository search helpers
-- `meta.go` and `meta/meta.go` — package metadata parsing
-- `install/` — archive extraction and installation logic
-- `testdata/` — fixture data used in tests
+- Go 1.27+
+- Internet access to download Arch repository metadata
+- A Linux environment with a standard Arch package layout in mind
 
 ## Installation
 
@@ -35,9 +33,17 @@ From the repository root, build the binary:
 go build ./...
 ```
 
-This produces a `stowy` executable in the working directory.
+This produces a `stowy` executable in the current working directory.
 
-## Usage
+## Quick start
+
+```bash
+go build ./...
+./stowy i ripgrep
+ripgrep --version
+```
+
+## Commands
 
 ### Search a repository
 
@@ -51,9 +57,9 @@ Example:
 ./stowy s core ripgrep
 ```
 
-This downloads the repository database for the selected mirror and prints matching packages.
+This downloads the repository database and prints package matches.
 
-### Install a package from Arch repos
+### Install a package from an Arch repository
 
 ```bash
 ./stowy i <package>
@@ -85,7 +91,7 @@ Example:
 ./stowy uninstall <package>
 ```
 
-Aliases supported by the CLI include:
+Aliases are also accepted:
 
 ```bash
 ./stowy d ripgrep
@@ -93,7 +99,7 @@ Aliases supported by the CLI include:
 ./stowy delete ripgrep
 ```
 
-## Install target
+## Install targets
 
 Package files are unpacked under:
 
@@ -101,37 +107,38 @@ Package files are unpacked under:
 ~/.local/stowy
 ```
 
-The CLI also creates launchers in:
+The project also creates symlinks or launchers in:
 
 ```bash
 ~/.local/bin
 ```
 
-These wrappers help make installed executables available on your `PATH` while giving the launched process access to the user-local library directory used by the package install.
+This keeps installed commands accessible on your `PATH` while leaving the main package tree inside your home directory.
+
+## Repository layout
+
+- `main.go` — CLI entry point and command dispatch
+- `repo.go` — repository database download and lookup logic
+- `search.go` — search helpers over package metadata
+- `meta.go` and `meta/meta.go` — package metadata parsing
+- `install/` — archive extraction and install logic
+- `testdata/` — fixtures used in tests
 
 ## Safety and limitations
 
-Warning: this tool is intentionally a prototype, not a trusted package management workflow.
+`stowy` is intentionally a prototype, not a trusted package-management workflow.
 
-At the moment, it does not verify package integrity before extracting files. It does not validate cryptographic signatures, compare checksums against trusted metadata, or defend against compromised mirrors or malicious archives in a production-grade way. It expects the repository metadata and package sources it downloads to be trusted by the user.
+At the moment it does not verify package integrity before extraction. It does not validate cryptographic signatures, compare checksums against trusted metadata, or defend against compromised mirrors or malicious archives in a production-grade way. It assumes repository metadata and package sources are already trusted by the user.
 
 The current implementation also does not provide:
 
 - automatic dependency resolution
 - package database tracking
-- authentic signature verification
+- signature verification
+- hardened security guarantees
 - robust conflict handling
-- hardened production-security guarantees
 
-Use it only with packages you are comfortable inspecting and testing in a controlled environment. Even though it installs into a user-owned prefix instead of system directories, it can still be risky if a package source is compromised or unexpectedly modified.
-
-## Quick start
-
-```bash
-go build ./...
-./stowy i ripgrep
-ripgrep --version
-```
+Use it with packages you are comfortable inspecting and testing in a controlled environment. Even though it installs into a user-owned prefix, a compromised source can still be dangerous.
 
 ## License
 
