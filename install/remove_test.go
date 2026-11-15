@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/ulikunitz/xz"
 )
 
 func TestRemoveDeletesInstalledPackageFilesAndLinks(t *testing.T) {
@@ -178,6 +179,21 @@ func TestExpkgReplacesReadOnlyExistingFile(t *testing.T) {
 	}
 }
 
+func TestExpkgExtractsXZPackage(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	archive := filepath.Join(t.TempDir(), "demo-armv7h.pkg.tar.xz")
+	writeXZTestPackage(t, archive, map[string]string{"usr/share/demo.txt": "arm package"})
+
+	if err := Expkg("demo", archive); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".local", "stowy", "root", "usr/share/demo.txt")
+	if data, err := os.ReadFile(path); err != nil || string(data) != "arm package" {
+		t.Fatalf("extracted contents = %q, %v", data, err)
+	}
+}
+
 func TestExpkgRejectsHardlinksOutsideInstallRoot(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -300,6 +316,38 @@ func TestRemoveDoesNotFollowReplacedParentSymlink(t *testing.T) {
 	}
 	if data, err := os.ReadFile(outsideFile); err != nil || string(data) != "keep me" {
 		t.Fatalf("outside file changed: %q, %v", data, err)
+	}
+}
+
+func writeXZTestPackage(t *testing.T, path string, files map[string]string) {
+	t.Helper()
+	var compressed bytes.Buffer
+	writer, err := xz.NewWriter(&compressed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw := tar.NewWriter(writer)
+	for name, contents := range files {
+		if err := tw.WriteHeader(&tar.Header{
+			Name:     name,
+			Mode:     0o644,
+			Size:     int64(len(contents)),
+			Typeflag: tar.TypeReg,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(contents)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, compressed.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

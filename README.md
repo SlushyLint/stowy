@@ -1,145 +1,45 @@
-# stowy
+# stowy-Debian
 
-`stowy` is a small, experimental Arch Linux package installer that keeps packages in a user-owned prefix instead of writing to system paths. It is intended as a learning project and local tool for exploring how package archives can be downloaded, extracted, and exposed from `~/.local` without requiring `sudo`.
+Stowy is an experimental user-space package installer. It extracts packages into
+`~/.local/stowy/root` and exposes installed commands through `~/.local/bin`.
+Despite the project name, the current package sources are Arch Linux and Arch
+Linux ARM repositories; this is not yet a Debian package frontend.
 
-This is not a replacement for `pacman`, and it is not a hardened production package manager. It is a compact prototype focused on user-space package experiments.
+## Build and use
 
-## What it does
-
-- Searches official Arch repository databases by package name
-- Downloads repository metadata from a mirror
-- Installs packages from `core`, `extra`, and `multilib`
-- Installs local `.pkg.tar.zst` archives
-- Extracts package contents into `~/.local/stowy`
-- Creates helper launchers under `~/.local/bin`
-- Removes packages previously installed by `stowy`
-- Rejects unsafe archive entries and unsupported package layout paths
-
-## Why this project exists
-
-The idea is simple: keep package metadata and extracted files under a user-owned prefix, expose the resulting binaries on `PATH`, and avoid modifying root-owned directories. It is useful for experimentation, learning, and local tooling where a full package manager would be overkill.
-
-## Requirements
-
-- Go 1.27+
-- Internet access to download Arch repository metadata
-- A Linux environment with a standard Arch package layout in mind
-
-## Installation
-
-From the repository root, build the binary:
-
-```bash
-go build ./...
-```
-
-This produces a `stowy` executable in the current working directory.
-
-## Quick start
-
-```bash
-go build ./...
+```sh
+go build -o stowy .
 ./stowy i ripgrep
-ripgrep --version
+./stowy l ./package.pkg.tar.zst
+./stowy uninstall ripgrep
 ```
 
-## Commands
+Local Arch Linux ARM `.pkg.tar.xz` archives are also supported. Package
+dependencies are downloaded from the matching repository when available.
 
-### Search a repository
+## Platform support
 
-```bash
-./stowy s <repo> <term>
-```
+Stowy selects packages for the architecture of its running Linux binary:
 
-Example:
+| Host | Package architecture | Repositories |
+| --- | --- | --- |
+| x86-64 (`amd64`) | `x86_64` | Arch Linux `core`, `extra`, `multilib` |
+| 64-bit ARM (`arm64`) | `aarch64` | Arch Linux ARM `core`, `extra` |
+| 32-bit ARMv7 hard-float | `armv7h` | Arch Linux ARM `core`, `extra` |
 
-```bash
-./stowy s core ripgrep
-```
+Other architectures and 32-bit ARM machines below ARMv7 are rejected.
+On 32-bit ARM, Stowy selects `armv7h` based on the machine reported by `uname`;
+it does not independently verify the userspace float ABI, so a hard-float
+userspace is required.
 
-This downloads the repository database and prints package matches.
+**ARM repository metadata and packages currently download over HTTP, and Stowy
+does not verify signatures.** Network tampering could replace metadata or
+package contents. Do not install ARM packages over untrusted networks.
 
-### Install a package from an Arch repository
+Architecture selection does not guarantee compatibility with every
+glibc-based distribution. Packages may require a newer glibc or other host
+runtime facilities; Stowy does not provide an isolated runtime. See
+[platform-support.md](./docs/platform-support.md) for details.
 
-```bash
-./stowy i <package>
-```
-
-Example:
-
-```bash
-./stowy i ripgrep
-```
-
-`stowy` checks the `core`, `extra`, and `multilib` repositories and installs the best match it finds.
-
-### Install a local package archive
-
-```bash
-./stowy l <package.tar.zst>
-```
-
-Example:
-
-```bash
-./stowy l /var/cache/pacman/pkg/ripgrep-14.1.0-1-x86_64.pkg.tar.zst
-```
-
-### Remove a package
-
-```bash
-./stowy uninstall <package>
-```
-
-Aliases are also accepted:
-
-```bash
-./stowy d ripgrep
-./stowy remove ripgrep
-./stowy delete ripgrep
-```
-
-## Install targets
-
-Package files are unpacked under:
-
-```bash
-~/.local/stowy
-```
-
-The project also creates symlinks or launchers in:
-
-```bash
-~/.local/bin
-```
-
-This keeps installed commands accessible on your `PATH` while leaving the main package tree inside your home directory.
-
-## Repository layout
-
-- `main.go` — CLI entry point and command dispatch
-- `repo.go` — repository database download and lookup logic
-- `search.go` — search helpers over package metadata
-- `meta.go` and `meta/meta.go` — package metadata parsing
-- `install/` — archive extraction and install logic
-- `testdata/` — fixtures used in tests
-
-## Safety and limitations
-
-`stowy` is intentionally a prototype, not a trusted package-management workflow.
-
-At the moment it does not verify package integrity before extraction. It does not validate cryptographic signatures, compare checksums against trusted metadata, or defend against compromised mirrors or malicious archives in a production-grade way. It assumes repository metadata and package sources are already trusted by the user.
-
-The current implementation also does not provide:
-
-- automatic dependency resolution
-- package database tracking
-- signature verification
-- hardened security guarantees
-- robust conflict handling
-
-Use it with packages you are comfortable inspecting and testing in a controlled environment. Even though it installs into a user-owned prefix, a compromised source can still be dangerous.
-
-## License
-
-This repository does not currently include a license file. If you plan to distribute or publish the project, add an explicit license before doing so.
+Stowy is a prototype, not a hardened package-management workflow. Review the
+security and package-source limitations before installing packages.

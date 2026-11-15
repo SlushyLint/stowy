@@ -2,13 +2,12 @@ package meta
 
 // ignore this shit, i enslaved goimports
 import (
-	"archive/tar"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
-	"github.com/klauspost/compress/zstd"
+	"stowy/pkgarchive"
 )
 
 type Pkg struct { // pretty fucking obvious what this mf does
@@ -63,6 +62,8 @@ func Parsen(dat string) Pkg {
 			pkg.Desk = line
 		case "%FILENAME%":
 			pkg.Fname = line
+		case "%ARCH%":
+			pkg.Archbtw = line
 		case "%DEPENDS%":
 			pkg.Depends = append(pkg.Depends, line)
 		case "%PROVIDES%":
@@ -104,19 +105,12 @@ func Parsepkg(dat string) Pkg { // parsed package info
 }
 
 func Pkginfo(path string) (Pkg, error) {
-	archfile, e := os.Open(path)
+	tr, closeArchive, e := pkgarchive.Open(path)
 	if e != nil {
 		return Pkg{}, e
 	}
-	defer archfile.Close()
+	defer closeArchive()
 
-	zstdr, e := zstd.NewReader(archfile)
-	if e != nil {
-		return Pkg{}, e
-	}
-	defer zstdr.Close()
-
-	tr := tar.NewReader(zstdr)
 	for {
 		header, e := tr.Next()
 		if e == io.EOF {

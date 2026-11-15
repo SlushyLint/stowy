@@ -7,3 +7,5 @@ uninstall/
 dotfiles/
 aura/
 yay/
+.devcontainer/
+.gitignore

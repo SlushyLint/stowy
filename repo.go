@@ -109,10 +109,10 @@ func dlfile(ctx context.Context, src, dest string) error {
 	return nil
 }
 
-func repodbpath(repo string) string {
+func repodbpath(repo, arch string) string {
 	cachedir, e := os.UserCacheDir()
 	if e != nil {
 		cachedir = "."
 	}
-	return filepath.Join(cachedir, "stowy", repo+".db")
+	return filepath.Join(cachedir, "stowy", arch, repo+".db")
 }
