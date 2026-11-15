@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -24,6 +23,9 @@ func TestRemoveDeletesInstalledPackageFilesAndLinks(t *testing.T) {
 	if err := Expkg("demo", archive); err != nil {
 		t.Fatal(err)
 	}
+	if installed, err := IsInstalled("demo"); err != nil || !installed {
+		t.Fatalf("IsInstalled(demo) = %t, %v; want true", installed, err)
+	}
 
 	root := filepath.Join(home, ".local", "stowy", "root")
 	command := filepath.Join(home, ".local", "bin", "demo")
@@ -33,6 +35,9 @@ func TestRemoveDeletesInstalledPackageFilesAndLinks(t *testing.T) {
 
 	if err := Remove("demo"); err != nil {
 		t.Fatal(err)
+	}
+	if installed, err := IsInstalled("demo"); err != nil || installed {
+		t.Fatalf("IsInstalled(demo) after remove = %t, %v; want false", installed, err)
 	}
 	for _, path := range []string{
 		filepath.Join(root, "usr/bin/demo"),
@@ -46,33 +51,91 @@ func TestRemoveDeletesInstalledPackageFilesAndLinks(t *testing.T) {
 	}
 }
 
-func TestCommandLauncherUsesUserLocalLibraries(t *testing.T) {
+func TestCommandLauncherUsesSandboxRunner(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("LD_LIBRARY_PATH", "/existing")
 	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
 	writeTestPackage(t, archive, map[string]string{
-		"usr/bin/demo": "#!/bin/sh\nprintf '%s\\n' \"$LD_LIBRARY_PATH\" \"$1\"\n",
+		"usr/bin/demo": "executable",
 	})
 	commandPath := filepath.Join(home, ".local", "bin", "demo")
 	if err := os.MkdirAll(filepath.Dir(commandPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(home, ".local", "stowy", "root", "usr/bin/demo"), commandPath); err != nil {
 		t.Fatal(err)
 	}
 	if err := Expkg("demo", archive); err != nil {
 		t.Fatal(err)
 	}
 
-	command := exec.Command(commandPath, "hello")
-	output, err := command.CombinedOutput()
+	launcher, err := os.ReadFile(commandPath)
 	if err != nil {
-		t.Fatalf("run command launcher: %v: %s", err, output)
+		t.Fatal(err)
 	}
-	expected := filepath.Join(home, ".local", "stowy", "root", "usr", "lib") + ":/existing\nhello\n"
-	if string(output) != expected {
-		t.Fatalf("command output = %q, want %q", output, expected)
+	expected := "#!/bin/sh\nexec \"${HOME:?}/.local/bin/stowy\" __run 'demo' \"$@\"\n"
+	if string(launcher) != expected {
+		t.Fatalf("command launcher = %q, want sandbox runner invocation %q", launcher, expected)
+	}
+}
+
+func TestRemoveDeletesLegacyCommandLauncher(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
+	writeTestPackage(t, archive, map[string]string{"usr/bin/demo": "executable"})
+	if err := Expkg("demo", archive); err != nil {
+		t.Fatal(err)
+	}
+
+	command := filepath.Join(home, ".local", "bin", "demo")
+	if err := os.WriteFile(command, []byte(legacyCommandLauncher("demo")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remove("demo"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(command); !os.IsNotExist(err) {
+		t.Fatalf("legacy launcher was not removed: %v", err)
+	}
+}
+
+func TestExpkgUpgradesLegacyCommandLauncher(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
+	writeTestPackage(t, archive, map[string]string{"usr/bin/demo": "executable"})
+	if err := Expkg("demo", archive); err != nil {
+		t.Fatal(err)
+	}
+
+	command := filepath.Join(home, ".local", "bin", "demo")
+	if err := os.WriteFile(command, []byte(legacyCommandLauncher("demo")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Expkg("demo", archive); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(command); err != nil || string(data) != commandLauncher("demo") {
+		t.Fatalf("upgraded launcher = %q, %v", data, err)
+	}
+}
+
+func TestMigrateCommandLaunchers(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
+	writeTestPackage(t, archive, map[string]string{"usr/bin/demo": "executable"})
+	if err := Expkg("demo", archive); err != nil {
+		t.Fatal(err)
+	}
+
+	command := filepath.Join(home, ".local", "bin", "demo")
+	if err := os.WriteFile(command, []byte(legacyCommandLauncher("demo")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateCommandLaunchers(); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(command); err != nil || string(data) != commandLauncher("demo") {
+		t.Fatalf("migrated launcher = %q, %v", data, err)
 	}
 }
 

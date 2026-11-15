@@ -32,6 +32,15 @@ func main() {
 
 // The command body returns an exit code; main exits only after it has finished printing.
 func run() (exitCode int) {
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "__run":
+			return runSandbox(os.Args[2:])
+		case "__sandbox-child":
+			return runSandboxChild(os.Args[2:])
+		}
+	}
+
 	// Run logs and progress in the shared terminal UI when attached to a terminal.
 	if err := statusline.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "E: initialize terminal UI: %v\n", err)
@@ -149,7 +158,7 @@ func run() (exitCode int) {
 			return 1
 		}
 		warnInsecureARMSource(target)
-		if err := installPackage(pkg, "", os.Args[2], newInstallState(), target); err != nil {
+		if err := installPackageWithRuntime(pkg, "", os.Args[2], newInstallState(), target); err != nil {
 			statusline.LogfTo(os.Stderr, "E: install %s: %v", pkg.Name, err)
 			return 1
 		}
@@ -216,7 +225,7 @@ func run() (exitCode int) {
 
 		ls("select", "selected %s %s from %s", pkg.Name, pkg.Ver, repo)
 
-		if err := installPackage(pkg, repo, "", newInstallState(), target); err != nil {
+		if err := installPackageWithRuntime(pkg, repo, "", newInstallState(), target); err != nil {
 			statusline.LogfTo(os.Stderr, "E: install package (%s): %v", pkg.Name, err)
 			return 1
 		}
@@ -385,6 +394,43 @@ func installPackage(pkg meta.Pkg, repo, archivePath string, state *installState,
 	}
 	state.installed[pkg.Name] = true
 	return nil
+}
+
+func installPackageWithRuntime(pkg meta.Pkg, repo, archivePath string, state *installState, target packageTarget) error {
+	for _, name := range []string{"filesystem", "glibc", "bash", "ca-certificates"} {
+		if state.installed[name] {
+			continue
+		}
+		installed, err := extract.IsInstalled(name)
+		if err != nil {
+			return fmt.Errorf("check sandbox runtime package %q: %w", name, err)
+		}
+		if installed && pkg.Name != name {
+			state.installed[name] = true
+			continue
+		}
+
+		if pkg.Name == name && archivePath != "" {
+			if err := installPackage(pkg, repo, archivePath, state, target); err != nil {
+				return fmt.Errorf("install sandbox runtime package %q: %w", name, err)
+			}
+			continue
+		}
+
+		runtimePackage, runtimeRepo, err := depends(name, target)
+		if err != nil {
+			return fmt.Errorf("resolve sandbox runtime package %q: %w", name, err)
+		}
+		if err := installPackage(runtimePackage, runtimeRepo, "", state, target); err != nil {
+			return fmt.Errorf("install sandbox runtime package %q: %w", name, err)
+		}
+	}
+
+	if err := extract.MigrateCommandLaunchers(); err != nil {
+		return fmt.Errorf("migrate installed command launchers: %w", err)
+	}
+
+	return installPackage(pkg, repo, archivePath, state, target)
 }
 
 func warnInsecureARMSource(target packageTarget) {

@@ -10,6 +10,28 @@ import (
 	"strings"
 )
 
+func IsInstalled(pkg string) (bool, error) {
+	if !validPackageName(pkg) {
+		return false, fmt.Errorf("E: invalid package name %q", pkg)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false, fmt.Errorf("E: could not find home directory: %w", err)
+	}
+	path := manifestPath(home, pkg)
+	manifest, err := readManifest(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("E: read package manifest %q: %w", pkg, err)
+	}
+	if manifest.Package != pkg {
+		return false, fmt.Errorf("E: package manifest %q contains mismatched package name %q", pkg, manifest.Package)
+	}
+	return true, nil
+}
+
 func Remove(pkg string) error {
 	if !validPackageName(pkg) {
 		return fmt.Errorf("E: invalid package name %q", pkg)
@@ -61,13 +83,25 @@ func Remove(pkg string) error {
 					}
 					remove = target == filepath.Join(root, file)
 				} else if info.Mode().IsRegular() {
-					launcher := commandLauncher(filepath.Base(file))
-					if info.Size() == int64(len(launcher)) {
+					launchers := []string{
+						commandLauncher(filepath.Base(file)),
+						legacyCommandLauncher(filepath.Base(file)),
+					}
+					maxLauncherSize := len(launchers[0])
+					if len(launchers[1]) > maxLauncherSize {
+						maxLauncherSize = len(launchers[1])
+					}
+					if info.Size() <= int64(maxLauncherSize) {
 						data, err := os.ReadFile(link)
 						if err != nil {
 							return fmt.Errorf("E: inspect command launcher %q: %w", link, err)
 						}
-						remove = string(data) == launcher
+						for _, launcher := range launchers {
+							if string(data) == launcher {
+								remove = true
+								break
+							}
+						}
 					}
 				}
 				if remove {

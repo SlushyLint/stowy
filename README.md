@@ -16,6 +16,10 @@ go build -o stowy .
 
 Local Arch Linux ARM `.pkg.tar.xz` archives are also supported. Package
 dependencies are downloaded from the matching repository when available.
+Stowy also installs an isolated Arch runtime (`filesystem`, `glibc`, `bash`,
+and `ca-certificates`) so installed apps use their package runtime instead of
+the host distro's libraries. Existing command launchers are migrated to
+sandboxed execution on the next package installation.
 
 ## Platform support
 
@@ -36,10 +40,14 @@ userspace is required.
 does not verify signatures.** Network tampering could replace metadata or
 package contents. Do not install ARM packages over untrusted networks.
 
-Architecture selection does not guarantee compatibility with every
-glibc-based distribution. Packages may require a newer glibc or other host
-runtime facilities; Stowy does not provide an isolated runtime. See
-[platform-support.md](./docs/platform-support.md) for details.
+Apps run in private Linux user and mount namespaces, with the Stowy runtime as
+their root filesystem. User namespaces must be enabled by the host kernel;
+Stowy reports an error instead of falling back to an unsandboxed launch. Apps
+can access the user's full home directory, desktop session sockets, host
+devices, and network. Apps see UID 0 inside the namespace, with capabilities
+dropped; apps that refuse to run as root fail without an automatic retry. This
+improves runtime portability, but is not a security boundary for untrusted
+apps. See [platform-support.md](./docs/platform-support.md) for details.
 
 Stowy is a prototype, not a hardened package-management workflow. Review the
 security and package-source limitations before installing packages.

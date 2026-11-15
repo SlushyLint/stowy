@@ -332,40 +332,34 @@ func expose(pkgdir string) error {
 				if target != src {
 					return fmt.Errorf("E: %s already exists", link)
 				}
-			} else if existing.Mode().IsRegular() && existing.Size() == int64(len(launcher)) {
-				data, readErr := os.ReadFile(link)
-				if readErr != nil {
-					return fmt.Errorf("I/O: could not inspect %s: %w", link, readErr)
+			} else if existing.Mode().IsRegular() {
+				legacyLauncher := legacyCommandLauncher(i.Name())
+				maxSize := len(launcher)
+				if len(legacyLauncher) > maxSize {
+					maxSize = len(legacyLauncher)
 				}
-				if string(data) == launcher {
-					continue
+				if existing.Size() <= int64(maxSize) {
+					data, readErr := os.ReadFile(link)
+					if readErr != nil {
+						return fmt.Errorf("I/O: could not inspect %s: %w", link, readErr)
+					}
+					if string(data) == launcher {
+						continue
+					}
+					if string(data) != legacyLauncher {
+						return fmt.Errorf("E: %s already exists", link)
+					}
+				} else {
+					return fmt.Errorf("E: %s already exists", link)
 				}
-				return fmt.Errorf("E: %s already exists", link)
 			} else {
 				return fmt.Errorf("E: %s already exists", link)
 			}
 		} else if !os.IsNotExist(e) {
 			return fmt.Errorf("I/O: could not inspect %s: %w", link, e)
 		}
-		temp, e := os.CreateTemp(userbin, ".stowy-launcher-*")
-		if e != nil {
-			return fmt.Errorf("I/O: create launcher for %q: %w", link, e)
-		}
-		tempName := temp.Name()
-		defer os.Remove(tempName)
-		if e := temp.Chmod(0o755); e != nil {
-			temp.Close()
-			return fmt.Errorf("I/O: set launcher permissions for %q: %w", link, e)
-		}
-		if _, e := temp.WriteString(launcher); e != nil {
-			temp.Close()
-			return fmt.Errorf("I/O: write launcher for %q: %w", link, e)
-		}
-		if e := temp.Close(); e != nil {
-			return fmt.Errorf("I/O: close launcher for %q: %w", link, e)
-		}
-		if e := os.Rename(tempName, link); e != nil {
-			return fmt.Errorf("E: install launcher %q: %w", link, e)
+		if err := writeCommandLauncher(link, launcher); err != nil {
+			return fmt.Errorf("E: install launcher %q: %w", link, err)
 		}
 		logStep("link", "exposed command %s", link)
 	}
@@ -374,7 +368,107 @@ func expose(pkgdir string) error {
 
 }
 
+func MigrateCommandLaunchers() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("find home directory: %w", err)
+	}
+	root := filepath.Join(home, ".local", "stowy", "root")
+	installedDir := filepath.Join(home, ".local", "stowy", "installed")
+	entries, err := os.ReadDir(installedDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read installed package manifests: %w", err)
+	}
+
+	userbin := filepath.Join(home, ".local", "bin")
+	migrated := make(map[string]struct{})
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		manifest, err := readManifest(filepath.Join(installedDir, entry.Name()))
+		if err != nil {
+			return fmt.Errorf("read package manifest %q: %w", entry.Name(), err)
+		}
+		for _, file := range manifest.Files {
+			if filepath.Dir(file) != filepath.Join("usr", "bin") {
+				continue
+			}
+			command := filepath.Base(file)
+			if _, done := migrated[command]; done {
+				continue
+			}
+			link := filepath.Join(userbin, command)
+			info, err := os.Lstat(link)
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("inspect command launcher %q: %w", link, err)
+			}
+
+			managed := false
+			if info.Mode()&os.ModeSymlink != 0 {
+				target, err := os.Readlink(link)
+				if err != nil {
+					return fmt.Errorf("inspect command link %q: %w", link, err)
+				}
+				managed = target == filepath.Join(root, file)
+			} else if info.Mode().IsRegular() {
+				legacy := legacyCommandLauncher(command)
+				if info.Size() == int64(len(legacy)) {
+					data, err := os.ReadFile(link)
+					if err != nil {
+						return fmt.Errorf("read command launcher %q: %w", link, err)
+					}
+					managed = string(data) == legacy
+				}
+			}
+			if !managed {
+				continue
+			}
+			if err := writeCommandLauncher(link, commandLauncher(command)); err != nil {
+				return fmt.Errorf("migrate command launcher %q: %w", link, err)
+			}
+			migrated[command] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func writeCommandLauncher(link, launcher string) error {
+	temp, err := os.CreateTemp(filepath.Dir(link), ".stowy-launcher-*")
+	if err != nil {
+		return fmt.Errorf("create temporary launcher: %w", err)
+	}
+	tempName := temp.Name()
+	defer os.Remove(tempName)
+	if err := temp.Chmod(0o755); err != nil {
+		temp.Close()
+		return fmt.Errorf("set launcher permissions: %w", err)
+	}
+	if _, err := temp.WriteString(launcher); err != nil {
+		temp.Close()
+		return fmt.Errorf("write launcher: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close launcher: %w", err)
+	}
+	if err := os.Rename(tempName, link); err != nil {
+		return err
+	}
+	return nil
+}
+
 func commandLauncher(command string) string {
+	return "#!/bin/sh\n" +
+		"exec \"${HOME:?}/.local/bin/stowy\" __run " + shellQuote(command) + " \"$@\"\n"
+}
+
+func legacyCommandLauncher(command string) string {
 	return "#!/bin/sh\n" +
 		"STOWY_ROOT=\"${HOME:?}/.local/stowy/root\"\n" +
 		"export LD_LIBRARY_PATH=\"$STOWY_ROOT/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\"\n" +
