@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"stowy/internal/statusline"
+
 	"golang.org/x/term"
 )
 
@@ -29,18 +31,20 @@ func (p *downloadProgress) Write(b []byte) (int, error) {
 }
 
 func (p *downloadProgress) render() {
+
 	if p.total > 0 {
 		ratio := float64(p.downloaded) / float64(p.total)
 		if ratio > 1 {
 			ratio = 1
 		}
 		filled := int(ratio * 20)
-		fmt.Fprintf(os.Stderr, "\r|%s%s\x1b[0m| %3.0f%%",
-			strings.Repeat("\x1b[32m~", filled),
-			strings.Repeat("\x1b[31m-", 20-filled),
-			ratio*100)
+		// Draw the download bar in the footer's lower row.
+		statusline.Progress(fmt.Sprintf("|\x1b[32m%s\x1b[0m\x1b[90m%s\x1b[0m| %3.0f%%",
+			strings.Repeat("~", filled),
+			strings.Repeat("-", 20-filled),
+			ratio*100))
 	} else {
-		fmt.Fprintf(os.Stderr, "\rDownloaded %d bytes", p.downloaded)
+		statusline.Progress(fmt.Sprintf("\x1b[36mDownloaded %d bytes\x1b[0m", p.downloaded))
 	}
 	p.lastUpdate = time.Now()
 }
@@ -48,7 +52,8 @@ func (p *downloadProgress) render() {
 func (p *downloadProgress) finish() {
 	if p.enabled {
 		p.render()
-		fmt.Fprintln(os.Stderr)
+		// Clear the lower footer row after the download finishes.
+		statusline.FinishProgress()
 	}
 }
 
@@ -82,8 +87,10 @@ func dlfile(ctx context.Context, src, dest string) error {
 
 	progress := &downloadProgress{
 		total:   resp.ContentLength,
-		enabled: term.IsTerminal(int(os.Stderr.Fd())),
+		enabled: term.IsTerminal(int(os.Stdout.Fd())),
 	}
+	// Keep the operation label above the download bar in the shared footer.
+	statusline.Status(fmt.Sprintf("Downloading %s", filepath.Base(src)))
 
 	_, copyErr := io.Copy(io.MultiWriter(tmp, progress), resp.Body)
 	progress.finish()
@@ -95,7 +102,11 @@ func dlfile(ctx context.Context, src, dest string) error {
 		return fmt.Errorf("close temp file: %w", err)
 	}
 
-	return os.Rename(tmp.Name(), dest)
+	if err := os.Rename(tmp.Name(), dest); err != nil {
+		return err
+	}
+	statusline.Status(fmt.Sprintf("Downloaded %s", filepath.Base(dest)))
+	return nil
 }
 
 func repodbpath(repo string) string {

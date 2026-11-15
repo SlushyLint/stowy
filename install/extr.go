@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"stowy/internal/statusline"
+
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/term"
 )
@@ -70,8 +72,13 @@ func Expkg(pkgname, archpath string) error {
 	var dirs []string
 	progress := extractionProgress{
 		packageName: pkgname,
-		enabled:     term.IsTerminal(int(os.Stderr.Fd())),
+		// Match the shared renderer, which only animates when stdout is a terminal.
+		enabled: term.IsTerminal(int(os.Stdout.Fd())),
 	}
+	// Show extraction as the footer status; the lower row is its moving activity bar.
+	statusline.Status(fmt.Sprintf("Extracting %s", pkgname))
+	// Flush the latest extraction state even when extraction exits early with an error.
+	defer statusline.FinishProgress()
 
 	// read every package entry
 	for {
@@ -150,8 +157,8 @@ func Expkg(pkgname, archpath string) error {
 			if e := expose(pkgdir); e != nil {
 				return fmt.Errorf("I/O: could not correctly expose to path\nSTDERR: %w\n", e)
 			}
-			logStep("done", "package extraction complete")
 			progress.finish()
+			logStep("done", "package extraction complete")
 			return nil
 		}
 		if e != nil {
@@ -391,7 +398,8 @@ func shellQuote(value string) string {
 }
 
 func logStep(label, format string, args ...interface{}) {
-	fmt.Printf("\033[1m\033[36m%s\033[0m %s\n", label, fmt.Sprintf(format, args...))
+	// Route extraction logs through the shared writer so progress is appended after each message.
+	statusline.Logf("\033[1m\033[36m%s\033[0m %s", label, fmt.Sprintf(format, args...))
 }
 
 func localSymlinkTarget(name, linkname string) (string, error) {
@@ -416,7 +424,6 @@ type extractionProgress struct {
 	count       int
 	lastUpdate  time.Time
 	enabled     bool
-	shown       bool
 }
 
 func (p *extractionProgress) step() {
@@ -425,13 +432,25 @@ func (p *extractionProgress) step() {
 		return
 	}
 
-	//	fmt.Fprintf(os.Stderr, "\rExtracting %s: %d items", p.packageName, p.count)
+	// Keep the status row static and animate only the lower row; the archive has no known total.
+	statusline.Progress(fmt.Sprintf("%s %d items", p.activityBar(), p.count))
 	p.lastUpdate = time.Now()
-	p.shown = true
 }
 
 func (p *extractionProgress) finish() {
-	if p.shown {
-		fmt.Fprintf(os.Stderr, "\rExtracted %s: %d items\n", p.packageName, p.count)
+	statusline.FinishProgress()
+	statusline.Status(fmt.Sprintf("Extracted %s: %d items", p.packageName, p.count))
+}
+
+func (p *extractionProgress) activityBar() string {
+	const barWidth = 20
+	const markerWidth = 4
+	travel := barWidth - markerWidth
+	position := p.count % (2 * travel)
+	if position > travel {
+		position = 2*travel - position
 	}
+	return "[" + strings.Repeat(" ", position) +
+		"\x1b[36m" + strings.Repeat("~", markerWidth) + "\x1b[0m" +
+		strings.Repeat(" ", barWidth-markerWidth-position) + "]"
 }

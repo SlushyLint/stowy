@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	extract "stowy/install"
-	"stowy/meta"
 	"strings"
+
+	extract "stowy/install"
+	"stowy/internal/statusline"
+	"stowy/meta"
 )
 
 type Paths struct {
@@ -25,6 +27,25 @@ const (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+// The command body returns an exit code; main exits only after it has finished printing.
+func run() (exitCode int) {
+	// Run logs and progress in the shared terminal UI when attached to a terminal.
+	if err := statusline.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "E: initialize terminal UI: %v\n", err)
+		return 1
+	}
+	defer func() {
+		if err := statusline.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "E: close terminal UI: %v\n", err)
+			if exitCode == 0 {
+				exitCode = 1
+			}
+		}
+	}()
+
 	// this motherfucker gets to be the first line because it  pissed  me off
 
 	home, _ := os.UserHomeDir()
@@ -36,8 +57,8 @@ func main() {
 
 	for _, p := range []string{paths.Bin, paths.Lib, paths.Share} {
 		if err := cp(p); err != nil {
-			fmt.Fprintf(os.Stderr, "E: %v\n", err)
-			os.Exit(1)
+			statusline.LogfTo(os.Stderr, "E: %v", err)
+			return 1
 		}
 	}
 
@@ -54,14 +75,14 @@ func main() {
 	_, e := os.Lstat(usrbin)
 	if e == nil {
 	} else if os.IsNotExist(e) {
-		fmt.Printf("Symlink %v > %v does not exist\nCreating symlink...\n", path, usrbin)
+		statusline.Logf("Symlink %v > %v does not exist\nCreating symlink...", path, usrbin)
 		err := os.Symlink(path, usrbin)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "E: failed to create symlink: %v\n", err)
-			fmt.Printf("\nContinuing anyways...")
+			statusline.LogfTo(os.Stderr, "E: failed to create symlink: %v", err)
+			statusline.Logf("Continuing anyways...")
 		}
 	} else {
-		fmt.Fprintf(os.Stderr, "E: an error occured when symlinking stowy to ~/.local/bin/\ncontinuing anyways...")
+		statusline.LogfTo(os.Stderr, "E: an error occured when symlinking stowy to ~/.local/bin/\ncontinuing anyways...")
 	}
 
 	//		if err := cp(path); err != nil {
@@ -69,14 +90,14 @@ func main() {
 	//		os.Exit(1)
 	//	}
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "E: usage: stowy <search|install|local|uninstall> ...")
-		os.Exit(2)
+		statusline.LogfTo(os.Stderr, "E: usage: stowy <search|install|local|uninstall> ...")
+		return 2
 	}
 	switch os.Args[1] {
 	case "s":
 		if len(os.Args) != 4 {
-			fmt.Fprintln(os.Stderr, "E: usage (S): stowy S <repo> <term>")
-			os.Exit(2)
+			statusline.LogfTo(os.Stderr, "E: usage (S): stowy S <repo> <term>")
+			return 2
 		}
 		repo := os.Args[2]
 		term := os.Args[3]
@@ -85,53 +106,53 @@ func main() {
 
 		ls("repo", "downloading %s database", repo)
 		if err := dlfile(context.Background(), dburl, dbpath); err != nil {
-			fmt.Fprintf(os.Stderr, "E: downloading repo db (%s): %v\n", repo, err)
-			os.Exit(1)
+			statusline.LogfTo(os.Stderr, "E: downloading repo db (%s): %v", repo, err)
+			return 1
 		}
 
 		matches, err := lsdb(dbpath, term)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "E: search db (%s): %v\n", repo, err)
-			os.Exit(1)
+			statusline.LogfTo(os.Stderr, "E: search db (%s): %v", repo, err)
+			return 1
 		}
 		if len(matches) == 0 {
 			lw("no package matches for %q in %s", term, repo)
-			os.Exit(0)
+			return 0
 		}
 		pplist(matches)
 
 	case "l":
 		if len(os.Args) != 3 {
-			fmt.Fprintln(os.Stderr, "E: usage: stowy l <package.tar.zst>")
-			os.Exit(2)
+			statusline.LogfTo(os.Stderr, "E: usage: stowy l <package.tar.zst>")
+			return 2
 		}
 		ls("archive", "reading local package metadata from %s", os.Args[2])
 		pkg, err := meta.Pkginfo(os.Args[2])
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "E: %v\n", err)
-			os.Exit(1)
+			statusline.LogfTo(os.Stderr, "E: %v", err)
+			return 1
 		}
 
 		if err := installPackage(pkg, "", os.Args[2], newInstallState()); err != nil {
-			fmt.Fprintf(os.Stderr, "E: install %s: %v\n", pkg.Name, err)
-			os.Exit(1)
+			statusline.LogfTo(os.Stderr, "E: install %s: %v", pkg.Name, err)
+			return 1
 		}
 		lS("installed %s", pkg.Name)
 
 	case "d", "delete", "remove", "uninstall":
 		if len(os.Args) != 3 {
-			fmt.Fprintln(os.Stderr, "E: usage: stowy uninstall <package>")
-			os.Exit(2)
+			statusline.LogfTo(os.Stderr, "E: usage: stowy uninstall <package>")
+			return 2
 		}
 		if err := extract.Remove(os.Args[2]); err != nil {
-			fmt.Fprintf(os.Stderr, "E: remove error: %v\n", err)
-			os.Exit(1)
+			statusline.LogfTo(os.Stderr, "E: remove error: %v", err)
+			return 1
 		}
 		lS("removed %s", os.Args[2])
 	case "i":
 		if len(os.Args) != 3 {
-			fmt.Fprintln(os.Stderr, "E: usage: stowy i <package>")
-			os.Exit(2)
+			statusline.LogfTo(os.Stderr, "E: usage: stowy i <package>")
+			return 2
 		}
 
 		term := os.Args[2]
@@ -143,14 +164,14 @@ func main() {
 		for _, candidateRepo := range repos {
 			dbpath, err := repoDatabase(candidateRepo)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "E: download database (%s): %v\n", candidateRepo, err)
-				os.Exit(1)
+				statusline.LogfTo(os.Stderr, "E: download database (%s): %v", candidateRepo, err)
+				return 1
 			}
 
 			matches, err := lsdb(dbpath, term)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "E: search database (%s): %v\n", candidateRepo, err)
-				os.Exit(1)
+				statusline.LogfTo(os.Stderr, "E: search database (%s): %v", candidateRepo, err)
+				return 1
 			}
 
 			for _, match := range matches {
@@ -167,58 +188,62 @@ func main() {
 		}
 
 		if repo == "" {
-			fmt.Fprintf(os.Stderr, "E: package %q not found in %s\n", term, strings.Join(repos, ", "))
-			os.Exit(1)
+			statusline.LogfTo(os.Stderr, "E: package %q not found in %s", term, strings.Join(repos, ", "))
+			return 1
 		}
 
 		ls("select", "selected %s %s from %s", pkg.Name, pkg.Ver, repo)
 
 		if err := installPackage(pkg, repo, "", newInstallState()); err != nil {
-			fmt.Fprintf(os.Stderr, "E: install package (%s): %v\n", pkg.Name, err)
-			os.Exit(1)
+			statusline.LogfTo(os.Stderr, "E: install package (%s): %v", pkg.Name, err)
+			return 1
 		}
 
 		lS("installed %s", pkg.Name)
 	default:
-		fmt.Fprintf(os.Stderr, "E: unknown cmd: %q\nusage: stowy <search|install|local|uninstall> ...\n", os.Args[1])
-		os.Exit(2)
+		statusline.LogfTo(os.Stderr, "E: unknown cmd: %q\nusage: stowy <search|install|local|uninstall> ...", os.Args[1])
+		return 2
 	}
+	return 0
 }
 
+// These helpers write regular logs only; operation status is set explicitly by download/extract code.
 func ls(label, format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
-	fmt.Printf("%s%s%s%s %s\n", colorBold, colorCyan, label, colorReset, msg)
+	statusline.Logf("%s%s%s%s %s", colorBold, colorCyan, label, colorReset, msg)
 }
 
 func lS(format string, args ...interface{}) {
-	fmt.Printf("%s%s✔%s %s\n", colorBold, colorGreen, colorReset, fmt.Sprintf(format, args...))
+	msg := fmt.Sprintf(format, args...)
+	statusline.Logf("%s%s✔%s %s", colorBold, colorGreen, colorReset, msg)
 }
 
 func lw(format string, args ...interface{}) {
-	fmt.Printf("%s%s!%s %s\n", colorBold, colorWarn, colorReset, fmt.Sprintf(format, args...))
+	msg := fmt.Sprintf(format, args...)
+	statusline.Logf("%s%s!%s %s", colorBold, colorWarn, colorReset, msg)
 }
 
 func ppkginf(pkg meta.Pkg) {
-	fmt.Printf("\n%sPackage%s %s %s\n", colorBold, colorReset, pkg.Name, pkg.Ver)
-	fmt.Printf("  arch: %s\n", pkg.Archbtw)
+	statusline.Logf("\n%sPackage%s %s %s", colorBold, colorReset, pkg.Name, pkg.Ver)
+	statusline.Logf("  arch: %s", pkg.Archbtw)
 	if len(pkg.Depends) > 0 {
-		fmt.Printf("  depends:\n")
+		statusline.Logf("  depends:")
 		for _, dep := range pkg.Depends {
-			fmt.Printf("    - %s\n", dep)
+			statusline.Logf("    - %s", dep)
 		}
 	} else {
-		fmt.Printf("  depends: none\n")
+		statusline.Logf("  depends: none")
 	}
-	fmt.Println()
+	statusline.Logf("")
 }
 
 func pplist(matches []meta.Pkg) {
-	fmt.Printf("\n%sResults%s\n", colorBold, colorReset)
+	statusline.Logf("\n%sResults%s", colorBold, colorReset)
 	for _, pkg := range matches {
-		fmt.Printf("  %s %s - %s\n", pkg.Name, pkg.Ver, pkg.Desk)
-		fmt.Printf("    archive: %s\n", pkg.Fname)
+		statusline.Logf("  %s %s - %s", pkg.Name, pkg.Ver, pkg.Desk)
+		statusline.Logf("    archive: %s", pkg.Fname)
 	}
-	fmt.Println()
+	statusline.Logf("")
 }
 
 func list(dir string) []string {
