@@ -37,7 +37,10 @@ does not verify signatures.** Network tampering could replace metadata or
 package contents. Do not install ARM packages over untrusted networks.
 
 Exposed dynamically linked commands use the package set's glibc loader and
-libraries, avoiding mixing them with the host's glibc. This is not a complete
+libraries, including libraries in subdirectories of `usr/lib`, avoiding mixing
+them with the host's glibc. Absolute ELF library dependencies are redirected
+to matching libraries under the package root. Packaged Perl commands also
+search Perl module directories under the package root. This is not a complete
 runtime isolation: packages may still require host kernel features or other
 host facilities. See
 [platform-support.md](./docs/platform-support.md) for details.

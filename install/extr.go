@@ -58,6 +58,7 @@ func Expkg(pkgname, archpath string) error {
 	var symlinks []pendsymlink
 	var hardlinks []pendhardlink
 	var files []string
+	var regularFiles []string
 	var dirs []string
 	progress := extractionProgress{
 		packageName: pkgname,
@@ -138,6 +139,15 @@ func Expkg(pkgname, archpath string) error {
 				}
 				if e := os.Symlink(l.target, lp); e != nil {
 					return fmt.Errorf("I/O: create symlink %q: %w", lp, e)
+				}
+			}
+			for _, name := range regularFiles {
+				rewritten, err := rewriteAbsoluteELFNeededPaths(filepath.Join(pkgdir, name), pkgdir)
+				if err != nil {
+					return fmt.Errorf("I/O: normalize ELF dependencies in %q: %w", name, err)
+				}
+				if rewritten > 0 {
+					logStep("relocate", "rewrote %d absolute ELF dependency path(s) in %s", rewritten, name)
 				}
 			}
 			if e := writeManifest(home, pkgname, files, dirs); e != nil {
@@ -234,6 +244,7 @@ func Expkg(pkgname, archpath string) error {
 				return fmt.Errorf("I/O: could not close %v\nSTDERR: %w", out, e)
 			}
 			files = append(files, name)
+			regularFiles = append(regularFiles, name)
 		default:
 			return fmt.Errorf("E: %q has an unsupported archive entry of type %d\n", hdr.Name, hdr.Typeflag)
 
@@ -341,7 +352,7 @@ func expose(pkgdir string) error {
 				if string(data) == launcher {
 					continue
 				}
-				if string(data) != legacyCommandLauncher(i.Name()) {
+				if !isManagedCommandLauncher(i.Name(), string(data)) {
 					return fmt.Errorf("E: %s already exists", link)
 				}
 			} else {
@@ -378,10 +389,39 @@ func expose(pkgdir string) error {
 }
 
 func commandLauncher(command string) string {
-	launcher := "#!/bin/sh\n" +
+	return commandLauncherVersion(command, true, true)
+}
+
+func commandLauncherVersion(command string, includePerlModules, searchLibrarySubdirectories bool) string {
+	launcher := "#!/bin/sh\n"
+	if includePerlModules {
+		launcher += "# stowy: managed command launcher\n"
+	}
+	launcher +=
 		"STOWY_ROOT=\"${HOME:?}/.local/stowy/root\"\n" +
-		"STOWY_BINARY=\"$STOWY_ROOT/usr/bin/\"" + shellQuote(command) + "\n"
+			"STOWY_BINARY=\"$STOWY_ROOT/usr/bin/\"" + shellQuote(command) + "\n"
+	if includePerlModules {
+		launcher +=
+			"STOWY_PERL5LIB=\n" +
+				"for STOWY_PERL_DIR in \"$STOWY_ROOT\"/usr/lib/perl5/*/site_perl \"$STOWY_ROOT\"/usr/share/perl5/site_perl \"$STOWY_ROOT\"/usr/lib/perl5/*/vendor_perl \"$STOWY_ROOT\"/usr/share/perl5/vendor_perl \"$STOWY_ROOT\"/usr/lib/perl5/*/core_perl \"$STOWY_ROOT\"/usr/share/perl5/core_perl; do\n" +
+				"  [ -d \"$STOWY_PERL_DIR\" ] || continue\n" +
+				"  STOWY_PERL5LIB=\"${STOWY_PERL5LIB:+$STOWY_PERL5LIB:}$STOWY_PERL_DIR\"\n" +
+				"done\n" +
+				"if [ -n \"$STOWY_PERL5LIB\" ]; then\n" +
+				"  export PERL5LIB=\"$STOWY_PERL5LIB${PERL5LIB:+:$PERL5LIB}\"\n" +
+				"fi\n"
+	}
 	if loader := dynamicLoaderName(); loader != "" {
+		libraryInvocation := "  exec \"$STOWY_LOADER\" --library-path \"$STOWY_ROOT/usr/lib\" \"$STOWY_BINARY\" \"$@\"\n"
+		if searchLibrarySubdirectories {
+			libraryInvocation =
+				"  STOWY_LIBRARY_PATH=$(find \"$STOWY_ROOT/usr/lib\" -type d -print) || {\n" +
+					"    printf '%s\\n' 'stowy: could not locate bundled library directories' >&2\n" +
+					"    exit 127\n" +
+					"  }\n" +
+					"  STOWY_LIBRARY_PATH=$(printf '%s\\n' \"$STOWY_LIBRARY_PATH\" | tr '\\n' ':')\n" +
+					"  exec \"$STOWY_LOADER\" --library-path \"$STOWY_LIBRARY_PATH\" \"$STOWY_BINARY\" \"$@\"\n"
+		}
 		launcher +=
 			"if [ \"$(od -An -N4 -tx1 \"$STOWY_BINARY\" 2>/dev/null | tr -d '[:space:]')\" = 7f454c46 ]; then\n" +
 				"  STOWY_LOADER=\"$STOWY_ROOT/usr/lib/" + loader + "\"\n" +
@@ -389,7 +429,7 @@ func commandLauncher(command string) string {
 				"    printf '%s\\n' 'stowy: bundled dynamic loader is missing' >&2\n" +
 				"    exit 127\n" +
 				"  fi\n" +
-				"  exec \"$STOWY_LOADER\" --library-path \"$STOWY_ROOT/usr/lib\" \"$STOWY_BINARY\" \"$@\"\n" +
+				libraryInvocation +
 				"fi\n"
 	}
 	return launcher + "exec \"$STOWY_BINARY\" \"$@\"\n"
@@ -400,6 +440,30 @@ func legacyCommandLauncher(command string) string {
 		"STOWY_ROOT=\"${HOME:?}/.local/stowy/root\"\n" +
 		"export LD_LIBRARY_PATH=\"$STOWY_ROOT/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\"\n" +
 		"exec \"$STOWY_ROOT/usr/bin/\"" + shellQuote(command) + " \"$@\"\n"
+}
+
+func bundledLoaderCommandLauncher(command string) string {
+	return commandLauncherVersion(command, false, false)
+}
+
+func nestedLibraryCommandLauncher(command string) string {
+	return commandLauncherVersion(command, false, true)
+}
+
+func isManagedCommandLauncher(command, content string) bool {
+	if strings.HasPrefix(content, "#!/bin/sh\n# stowy: managed command launcher\n") {
+		return true
+	}
+	for _, launcher := range []string{
+		legacyCommandLauncher(command),
+		bundledLoaderCommandLauncher(command),
+		nestedLibraryCommandLauncher(command),
+	} {
+		if content == launcher {
+			return true
+		}
+	}
+	return false
 }
 
 func dynamicLoaderName() string {

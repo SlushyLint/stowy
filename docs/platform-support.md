@@ -12,4 +12,4 @@ Other architectures, and 32-bit ARM machines below ARMv7, are rejected rather th
 
 **ARM repository metadata and packages currently download over HTTP, and Stowy does not verify signatures.** This is an acknowledged prototype limitation: network tampering could replace metadata or package contents. Do not use ARM package installs on untrusted networks.
 
-Exposed dynamically linked commands use the package set's glibc loader and libraries rather than the host's glibc. This avoids mixing the package's libraries with the host loader, but is not a complete isolated runtime: packages may still require host kernel features or other host facilities.
+Exposed dynamically linked commands use the package set's glibc loader and libraries, including libraries in subdirectories of `usr/lib`, rather than the host's glibc. Absolute ELF library dependencies are redirected to matching libraries under the package root. Packaged Perl commands also search Perl module directories under the package root. This avoids mixing the package's libraries with the host loader, but is not a complete isolated runtime: packages may still require host kernel features or other host facilities.

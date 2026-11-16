@@ -3,9 +3,11 @@ package extract
 import (
 	"archive/tar"
 	"bytes"
+	"debug/elf"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
@@ -46,13 +48,16 @@ func TestRemoveDeletesInstalledPackageFilesAndLinks(t *testing.T) {
 	}
 }
 
-func TestCommandLauncherKeepsHostLibraryPathForScripts(t *testing.T) {
+func TestCommandLauncherSetsBundledPerlModulePathForScripts(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("LD_LIBRARY_PATH", "/existing")
+	t.Setenv("PERL5LIB", "/existing-perl")
 	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
 	writeTestPackage(t, archive, map[string]string{
-		"usr/bin/demo": "#!/bin/sh\nprintf '%s\\n' \"$LD_LIBRARY_PATH\" \"$1\"\n",
+		"usr/bin/demo":                               "#!/bin/sh\nprintf '%s\\n' \"$LD_LIBRARY_PATH\" \"$PERL5LIB\" \"$1\"\n",
+		"usr/lib/perl5/5.44/core_perl/Cwd.pm":        "package Cwd;",
+		"usr/share/perl5/core_perl/File/Basename.pm": "package File::Basename;",
 	})
 	commandPath := filepath.Join(home, ".local", "bin", "demo")
 	if err := os.MkdirAll(filepath.Dir(commandPath), 0o755); err != nil {
@@ -70,7 +75,11 @@ func TestCommandLauncherKeepsHostLibraryPathForScripts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run command launcher: %v: %s", err, output)
 	}
-	expected := "/existing\nhello\n"
+	root := filepath.Join(home, ".local", "stowy", "root")
+	expected := "/existing\n" +
+		filepath.Join(root, "usr/lib/perl5/5.44/core_perl") + ":" +
+		filepath.Join(root, "usr/share/perl5/core_perl") + ":/existing-perl\n" +
+		"hello\n"
 	if string(output) != expected {
 		t.Fatalf("command output = %q, want %q", output, expected)
 	}
@@ -81,13 +90,19 @@ func TestCommandLauncherUsesBundledLoaderForELF(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("LD_LIBRARY_PATH", "/existing")
 	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
-	writeTestPackage(t, archive, map[string]string{"usr/bin/demo": "\x7fELF\x00demo"})
+	writeTestPackage(t, archive, map[string]string{
+		"usr/bin/demo": string(elfWithAbsoluteDependency(elf.ELFCLASS64)),
+	})
 	if err := Expkg("demo", archive); err != nil {
 		t.Fatal(err)
 	}
 
 	root := filepath.Join(home, ".local", "stowy", "root")
 	loader := filepath.Join(root, "usr", "lib", dynamicLoaderName())
+	nestedLibraryDir := filepath.Join(root, "usr", "lib", "perl5", "5.44", "core_perl", "CORE")
+	if err := os.MkdirAll(nestedLibraryDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Dir(loader), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -104,11 +119,31 @@ func TestCommandLauncherUsesBundledLoaderForELF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run command launcher: %v: %s", err, output)
 	}
-	expected := "/existing\n--library-path\n" +
-		filepath.Join(root, "usr/lib") + "\n" +
-		filepath.Join(root, "usr/bin/demo") + "\nhello\n"
-	if string(output) != expected {
-		t.Fatalf("command output = %q, want %q", output, expected)
+	lines := strings.Split(strings.TrimSuffix(string(output), "\n"), "\n")
+	if len(lines) != 5 || lines[0] != "/existing" || lines[1] != "--library-path" ||
+		lines[3] != filepath.Join(root, "usr/bin/demo") || lines[4] != "hello" {
+		t.Fatalf("command output = %q, unexpected loader invocation", output)
+	}
+	libraryDirs := strings.Split(strings.TrimSuffix(lines[2], ":"), ":")
+	for _, want := range []string{
+		filepath.Join(root, "usr/lib"),
+		nestedLibraryDir,
+	} {
+		found := false
+		for _, got := range libraryDirs {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("loader library path %q does not include %q", lines[2], want)
+		}
+	}
+	for _, path := range libraryDirs {
+		if path == "/existing" {
+			t.Errorf("loader library path unexpectedly includes host library path: %q", lines[2])
+		}
 	}
 }
 
@@ -121,15 +156,42 @@ func TestExpkgReplacesLegacyCommandLauncher(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(commandPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(commandPath, []byte(legacyCommandLauncher("demo")), 0o755); err != nil {
-		t.Fatal(err)
+	for _, oldLauncher := range []string{
+		legacyCommandLauncher("demo"),
+		bundledLoaderCommandLauncher("demo"),
+		nestedLibraryCommandLauncher("demo"),
+		"#!/bin/sh\n# stowy: managed command launcher\n# previous launcher version\n",
+	} {
+		if err := os.WriteFile(commandPath, []byte(oldLauncher), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := Expkg("demo", archive); err != nil {
+			t.Fatal(err)
+		}
+		if data, err := os.ReadFile(commandPath); err != nil || string(data) != commandLauncher("demo") {
+			t.Fatalf("command launcher = %q, %v", data, err)
+		}
 	}
+}
 
+func TestRemoveDeletesPreviousCommandLauncher(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
+	writeTestPackage(t, archive, map[string]string{"usr/bin/demo": "executable"})
 	if err := Expkg("demo", archive); err != nil {
 		t.Fatal(err)
 	}
-	if data, err := os.ReadFile(commandPath); err != nil || string(data) != commandLauncher("demo") {
-		t.Fatalf("command launcher = %q, %v", data, err)
+
+	commandPath := filepath.Join(home, ".local", "bin", "demo")
+	if err := os.WriteFile(commandPath, []byte(nestedLibraryCommandLauncher("demo")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remove("demo"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(commandPath); !os.IsNotExist(err) {
+		t.Fatalf("previous command launcher was not removed: %v", err)
 	}
 }
 

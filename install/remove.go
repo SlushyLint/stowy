@@ -61,13 +61,13 @@ func Remove(pkg string) error {
 					}
 					remove = target == filepath.Join(root, file)
 				} else if info.Mode().IsRegular() {
-					launcher := commandLauncher(filepath.Base(file))
-					if info.Size() == int64(len(launcher)) {
+					command := filepath.Base(file)
+					if info.Size() <= 16*1024 {
 						data, err := os.ReadFile(link)
 						if err != nil {
 							return fmt.Errorf("E: inspect command launcher %q: %w", link, err)
 						}
-						remove = string(data) == launcher
+						remove = isManagedCommandLauncher(command, string(data))
 					}
 				}
 				if remove {
