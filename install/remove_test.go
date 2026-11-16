@@ -48,22 +48,17 @@ func TestRemoveDeletesInstalledPackageFilesAndLinks(t *testing.T) {
 	}
 }
 
-func TestCommandLauncherSetsBundledPerlModulePathForScripts(t *testing.T) {
+func TestCommandLauncherDelegatesToStowyRun(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("LD_LIBRARY_PATH", "/existing")
-	t.Setenv("PERL5LIB", "/existing-perl")
 	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
-	writeTestPackage(t, archive, map[string]string{
-		"usr/bin/demo":                               "#!/bin/sh\nprintf '%s\\n' \"$LD_LIBRARY_PATH\" \"$PERL5LIB\" \"$1\"\n",
-		"usr/lib/perl5/5.44/core_perl/Cwd.pm":        "package Cwd;",
-		"usr/share/perl5/core_perl/File/Basename.pm": "package File::Basename;",
-	})
+	writeTestPackage(t, archive, map[string]string{"usr/bin/demo": "#!/bin/sh\n"})
 	commandPath := filepath.Join(home, ".local", "bin", "demo")
 	if err := os.MkdirAll(filepath.Dir(commandPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(home, ".local", "stowy", "root", "usr/bin/demo"), commandPath); err != nil {
+	stowy := filepath.Join(filepath.Dir(commandPath), "stowy")
+	if err := os.WriteFile(stowy, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := Expkg("demo", archive); err != nil {
@@ -75,20 +70,15 @@ func TestCommandLauncherSetsBundledPerlModulePathForScripts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run command launcher: %v: %s", err, output)
 	}
-	root := filepath.Join(home, ".local", "stowy", "root")
-	expected := "/existing\n" +
-		filepath.Join(root, "usr/lib/perl5/5.44/core_perl") + ":" +
-		filepath.Join(root, "usr/share/perl5/core_perl") + ":/existing-perl\n" +
-		"hello\n"
+	expected := "run\ndemo\nhello\n"
 	if string(output) != expected {
 		t.Fatalf("command output = %q, want %q", output, expected)
 	}
 }
 
-func TestCommandLauncherUsesBundledLoaderForELF(t *testing.T) {
+func TestCommandLauncherDelegatesForELF(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("LD_LIBRARY_PATH", "/existing")
 	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
 	writeTestPackage(t, archive, map[string]string{
 		"usr/bin/demo": string(elfWithAbsoluteDependency(elf.ELFCLASS64)),
@@ -96,54 +86,13 @@ func TestCommandLauncherUsesBundledLoaderForELF(t *testing.T) {
 	if err := Expkg("demo", archive); err != nil {
 		t.Fatal(err)
 	}
-
-	root := filepath.Join(home, ".local", "stowy", "root")
-	loader := filepath.Join(root, "usr", "lib", dynamicLoaderName())
-	nestedLibraryDir := filepath.Join(root, "usr", "lib", "perl5", "5.44", "core_perl", "CORE")
-	if err := os.MkdirAll(nestedLibraryDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(loader), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	loaderScript := "#!/bin/sh\n" +
-		"if [ \"$1\" = --verify ]; then exit 0; fi\n" +
-		"printf '%s\\n' \"$LD_LIBRARY_PATH\" \"$1\" \"$2\" \"$3\" \"$4\"\n"
-	if err := os.WriteFile(loader, []byte(loaderScript), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
 	commandPath := filepath.Join(home, ".local", "bin", "demo")
-	command := exec.Command(commandPath, "hello")
-	output, err := command.CombinedOutput()
+	data, err := os.ReadFile(commandPath)
 	if err != nil {
-		t.Fatalf("run command launcher: %v: %s", err, output)
+		t.Fatal(err)
 	}
-	lines := strings.Split(strings.TrimSuffix(string(output), "\n"), "\n")
-	if len(lines) != 5 || lines[0] != "/existing" || lines[1] != "--library-path" ||
-		lines[3] != filepath.Join(root, "usr/bin/demo") || lines[4] != "hello" {
-		t.Fatalf("command output = %q, unexpected loader invocation", output)
-	}
-	libraryDirs := strings.Split(strings.TrimSuffix(lines[2], ":"), ":")
-	for _, want := range []string{
-		filepath.Join(root, "usr/lib"),
-		nestedLibraryDir,
-	} {
-		found := false
-		for _, got := range libraryDirs {
-			if got == want {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("loader library path %q does not include %q", lines[2], want)
-		}
-	}
-	for _, path := range libraryDirs {
-		if path == "/existing" {
-			t.Errorf("loader library path unexpectedly includes host library path: %q", lines[2])
-		}
+	if !strings.Contains(string(data), `run 'demo' "$@"`) {
+		t.Fatalf("launcher does not delegate to stowy run: %s", data)
 	}
 }
 
@@ -240,17 +189,17 @@ func TestExpkgExtractsHardlinks(t *testing.T) {
 func TestExpkgReplacesExistingHardlinkDestination(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	archive := filepath.Join(t.TempDir(), "tzdata.pkg.tar.zst")
+	firstArchive := filepath.Join(t.TempDir(), "tzdata-v1.pkg.tar.zst")
+	writeTestPackage(t, firstArchive, map[string]string{"usr/share/zoneinfo/Africa/Accra": "stale data"})
+	if err := Expkg("tzdata", firstArchive); err != nil {
+		t.Fatal(err)
+	}
+
+	archive := filepath.Join(t.TempDir(), "tzdata-v2.pkg.tar.zst")
 	writeHardlinkTestPackage(t, archive, "usr/share/zoneinfo/Africa/Abidjan", "usr/share/zoneinfo/Africa/Accra", "zone data")
 
 	root := filepath.Join(home, ".local", "stowy", "root")
 	destination := filepath.Join(root, "usr/share/zoneinfo/Africa/Accra")
-	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(destination, []byte("stale data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
 	if err := Expkg("tzdata", archive); err != nil {
 		t.Fatal(err)
@@ -275,22 +224,21 @@ func TestExpkgReplacesExistingHardlinkDestination(t *testing.T) {
 func TestExpkgReplacesReadOnlyExistingFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
-	writeTestPackage(t, archive, map[string]string{"usr/bin/demo": "new contents"})
+	firstArchive := filepath.Join(t.TempDir(), "demo-v1.pkg.tar.zst")
+	writeTestPackage(t, firstArchive, map[string]string{"usr/bin/demo": "old contents"})
+	if err := Expkg("demo", firstArchive); err != nil {
+		t.Fatal(err)
+	}
 
 	root := filepath.Join(home, ".local", "stowy", "root")
 	path := filepath.Join(root, "usr/bin/demo")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("old contents"), 0o555); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.Chmod(path, 0o555); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := Expkg("demo", archive); err != nil {
+	nextArchive := filepath.Join(t.TempDir(), "demo-v2.pkg.tar.zst")
+	writeTestPackage(t, nextArchive, map[string]string{"usr/bin/demo": "new contents"})
+	if err := Expkg("demo", nextArchive); err != nil {
 		t.Fatal(err)
 	}
 	if data, err := os.ReadFile(path); err != nil || string(data) != "new contents" {
@@ -313,6 +261,168 @@ func TestExpkgExtractsXZPackage(t *testing.T) {
 	}
 }
 
+func TestExpkgTracksVersionAndDependencies(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
+	writeTestPackage(t, archive, map[string]string{"usr/share/demo.txt": "package data"})
+
+	if err := ExpkgWithMetadata("demo", "1.2-3", []string{"glibc", "libgcc"}, archive); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := readManifest(manifestPath(home, "demo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Version != "1.2-3" || strings.Join(manifest.Dependencies, ",") != "glibc,libgcc" {
+		t.Fatalf("manifest metadata = version %q, dependencies %v", manifest.Version, manifest.Dependencies)
+	}
+}
+
+func TestIsInstalledVersionChecksManifestVersion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	installed, err := IsInstalledVersion("demo", "1.2-3")
+	if err != nil || installed {
+		t.Fatalf("missing package = %v, %v; want false, nil", installed, err)
+	}
+	if err := writeManifest(home, "demo", "1.2-3", nil, []string{"usr/share/demo"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		version string
+		want    bool
+	}{
+		{version: "1.2-3", want: true},
+		{version: "1.2-4", want: false},
+	} {
+		installed, err := IsInstalledVersion("demo", test.version)
+		if err != nil || installed != test.want {
+			t.Errorf("IsInstalledVersion(%q) = %v, %v; want %v, nil", test.version, installed, err, test.want)
+		}
+	}
+}
+
+func TestExpkgSkipsArchPackageMetadataFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
+	writeTestPackage(t, archive, map[string]string{
+		".BUILDINFO":         "build info",
+		".INSTALL":           "install script",
+		".MTREE":             "mtree",
+		".PKGINFO":           "pkg info",
+		"usr/share/demo.txt": "payload",
+	})
+	if err := Expkg("demo", archive); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(home, ".local", "stowy", "root")
+	for _, name := range []string{".BUILDINFO", ".INSTALL", ".MTREE", ".PKGINFO"} {
+		if _, err := os.Lstat(filepath.Join(root, name)); !os.IsNotExist(err) {
+			t.Errorf("package metadata %q was extracted: %v", name, err)
+		}
+	}
+}
+
+func TestExpkgUpgradeRemovesFilesNoLongerInPackage(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	firstArchive := filepath.Join(t.TempDir(), "demo-v1.pkg.tar.zst")
+	writeTestPackage(t, firstArchive, map[string]string{
+		"usr/share/old.txt":     "old",
+		"usr/share/current.txt": "current",
+	})
+	if err := ExpkgWithMetadata("demo", "1", nil, firstArchive); err != nil {
+		t.Fatal(err)
+	}
+
+	secondArchive := filepath.Join(t.TempDir(), "demo-v2.pkg.tar.zst")
+	writeTestPackage(t, secondArchive, map[string]string{"usr/share/current.txt": "updated"})
+	if err := ExpkgWithMetadata("demo", "2", nil, secondArchive); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(home, ".local", "stowy", "root")
+	if _, err := os.Stat(filepath.Join(root, "usr/share/old.txt")); !os.IsNotExist(err) {
+		t.Fatalf("stale package file remains: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "usr/share/current.txt")); err != nil || string(data) != "updated" {
+		t.Fatalf("updated file = %q, %v", data, err)
+	}
+}
+
+func TestExpkgRejectsConflictingPackageFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, ".local", "stowy", "root")
+	firstArchive := filepath.Join(t.TempDir(), "first.pkg.tar.zst")
+	writeTestPackage(t, firstArchive, map[string]string{"usr/share/shared.txt": "first package"})
+	if err := Expkg("first", firstArchive); err != nil {
+		t.Fatal(err)
+	}
+
+	secondArchive := filepath.Join(t.TempDir(), "second.pkg.tar.zst")
+	writeTestPackage(t, secondArchive, map[string]string{"usr/share/shared.txt": "different contents"})
+	if err := Expkg("second", secondArchive); err == nil || !strings.Contains(err.Error(), "conflicts with another installed package") {
+		t.Fatalf("Expkg error = %v, want package file conflict", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "usr/share/shared.txt")); err != nil || string(data) != "first package" {
+		t.Fatalf("existing package file changed: %q, %v", data, err)
+	}
+	if _, err := os.Stat(manifestPath(home, "second")); !os.IsNotExist(err) {
+		t.Fatalf("failed package received a manifest: %v", err)
+	}
+}
+
+func TestInstallTransactionRollbackRestoresReplacedFile(t *testing.T) {
+	root := t.TempDir()
+	workDir := t.TempDir()
+	target := filepath.Join(root, "usr/share/demo.txt")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tx := &installTransaction{root: root, workDir: workDir, backups: make(map[string]string)}
+	if err := tx.backupPath(target, filepath.Join("root", "usr/share/demo.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if data, err := os.ReadFile(target); err != nil || string(data) != "old" {
+		t.Fatalf("restored file = %q, %v", data, err)
+	}
+}
+
+func TestExpkgRejectsUnownedFileWithoutOverwriting(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, ".local", "stowy", "root")
+	path := filepath.Join(root, "usr/share/personal.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("personal data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
+	writeTestPackage(t, archive, map[string]string{"usr/share/personal.txt": "package data"})
+
+	if err := Expkg("demo", archive); err == nil || !strings.Contains(err.Error(), "not owned by package") {
+		t.Fatalf("Expkg error = %v, want unowned file conflict", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "personal data" {
+		t.Fatalf("personal file changed: %q, %v", data, err)
+	}
+}
+
 func TestExpkgRejectsHardlinksOutsideInstallRoot(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -324,7 +434,7 @@ func TestExpkgRejectsHardlinksOutsideInstallRoot(t *testing.T) {
 	}
 }
 
-func TestRemoveCleansPackageWhenCommandExposureFails(t *testing.T) {
+func TestExpkgLeavesNoPartialInstallWhenCommandExposureFails(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
@@ -340,14 +450,14 @@ func TestRemoveCleansPackageWhenCommandExposureFails(t *testing.T) {
 	if err := Expkg("demo", archive); err == nil {
 		t.Fatal("Expkg succeeded despite an existing command")
 	}
-	if err := Remove("demo"); err != nil {
-		t.Fatalf("Remove could not clean the partially installed package: %v", err)
+	if _, err := os.Stat(manifestPath(home, "demo")); !os.IsNotExist(err) {
+		t.Fatalf("failed install left a package manifest: %v", err)
 	}
 	if data, err := os.ReadFile(command); err != nil || string(data) != "existing command" {
 		t.Fatalf("existing command changed: %q, %v", data, err)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".local", "stowy", "root", "usr/bin/demo")); !os.IsNotExist(err) {
-		t.Fatalf("partially installed package file was not removed: %v", err)
+		t.Fatalf("failed install left a package file: %v", err)
 	}
 }
 

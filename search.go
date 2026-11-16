@@ -68,8 +68,8 @@ func compareVersions(left, right string) int {
 		return comparison
 	}
 
-	leftParts := versionParts(leftVersion)
-	rightParts := versionParts(rightVersion)
+	leftParts := trimTrailingZeroVersionParts(versionParts(leftVersion))
+	rightParts := trimTrailingZeroVersionParts(versionParts(rightVersion))
 	for i := 0; i < len(leftParts) && i < len(rightParts); i++ {
 		leftNumber := isNumeric(leftParts[i])
 		rightNumber := isNumeric(rightParts[i])
@@ -96,6 +96,13 @@ func compareVersions(left, right string) int {
 	default:
 		return 0
 	}
+}
+
+func trimTrailingZeroVersionParts(parts []string) []string {
+	for len(parts) > 0 && parts[len(parts)-1] == "0" {
+		parts = parts[:len(parts)-1]
+	}
+	return parts
 }
 
 func splitEpoch(version string) (string, string) {

@@ -16,6 +16,8 @@ go build -o stowy .
 
 Local Arch Linux ARM `.pkg.tar.xz` archives are also supported. Package
 dependencies are downloaded from the matching repository when available.
+Repository metadata is cached for one hour, and dependencies already installed
+at the selected version are reused instead of downloaded and extracted again.
 
 ## Platform support
 
@@ -42,7 +44,8 @@ them with the host's glibc. Absolute ELF library dependencies are redirected
 to matching libraries under the package root. Packaged Perl commands also
 search Perl module directories under the package root. This is not a complete
 runtime isolation: packages may still require host kernel features or other
-host facilities. See
+host facilities. Interactive commands run without Stowy's terminal UI so they
+can use the terminal directly. See
 [platform-support.md](./docs/platform-support.md) for details.
 
 Stowy is a prototype, not a hardened package-management workflow. Review the

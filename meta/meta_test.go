@@ -12,15 +12,28 @@ import (
 )
 
 func TestParsepkg(t *testing.T) {
-	pkg := Parsepkg(Read("../testdata/go-tools.PKGINFO"))
-	t.Logf("%+v", pkg)
+	pkg := Parsepkg("pkgname = go-tools\npkgver = 1.22.1-1\narch = x86_64\ndepend = glibc\n")
+	if pkg.Name != "go-tools" || pkg.Ver != "1.22.1-1" || pkg.Archbtw != "x86_64" {
+		t.Fatalf("parsed package = %+v", pkg)
+	}
+	if !reflect.DeepEqual(pkg.Depends, []string{"glibc"}) {
+		t.Fatalf("dependencies = %v, want glibc", pkg.Depends)
+	}
 }
 
 func TestParsen(t *testing.T) {
-	pkg := Parsen(Read("../testdata/sample.desc"))
+	pkg := Parsen(`%NAME%
+stowy-demo
+
+%VERSION%
+1.0-1
+
+%FILENAME%
+stowy-demo-1.0-1-any.pkg.tar.zst
+`)
 	want := "stowy-demo-1.0-1-any.pkg.tar.zst"
-	if pkg.Fname != want {
-		t.Fatalf("Fname = %q, want %q", pkg.Fname, want)
+	if pkg.Fname != want || pkg.Name != "stowy-demo" || pkg.Ver != "1.0-1" {
+		t.Fatalf("parsed package = %+v", pkg)
 	}
 }
 

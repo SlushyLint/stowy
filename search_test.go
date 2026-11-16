@@ -22,6 +22,8 @@ func TestPackageSatisfiesDependencies(t *testing.T) {
 		"tree-sitter",
 		"libtree-sitter.so=0.26-64",
 		"tree-sitter>=0.26.3",
+		"tree-sitter>=0.26",
+		"tree-sitter=0.26.3-1",
 	} {
 		if !packageSatisfies(pkg, requirement) {
 			t.Errorf("%q was not satisfied", requirement)
@@ -34,6 +36,19 @@ func TestPackageSatisfiesDependencies(t *testing.T) {
 	} {
 		if packageSatisfies(pkg, requirement) {
 			t.Errorf("%q was unexpectedly satisfied", requirement)
+		}
+	}
+}
+
+func TestPackageVersionComparisonIgnoresTrailingZeroSegments(t *testing.T) {
+	pkg := meta.Pkg{Name: "demo", Ver: "1.2.0-1"}
+	for _, requirement := range []string{
+		"demo>=1.2",
+		"demo=1.2.0-1",
+		"demo>=1.2.0",
+	} {
+		if !packageSatisfies(pkg, requirement) {
+			t.Fatalf("%q was not satisfied for version %q", requirement, pkg.Ver)
 		}
 	}
 }

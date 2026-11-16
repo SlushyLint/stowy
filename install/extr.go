@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	stowyruntime "stowy/internal/runtime"
 	"stowy/internal/statusline"
 	"stowy/pkgarchive"
 
@@ -20,6 +21,10 @@ import (
 
 // btw i use arch
 func Expkg(pkgname, archpath string) error {
+	return ExpkgWithMetadata(pkgname, "", nil, archpath)
+}
+
+func ExpkgWithMetadata(pkgname, version string, dependencies []string, archpath string) error {
 	// find user's ~ dir
 	home, e := os.UserHomeDir()
 	if e != nil {
@@ -29,8 +34,20 @@ func Expkg(pkgname, archpath string) error {
 		return fmt.Errorf("E: invalid package name %q", pkgname)
 	}
 
-	// create a directory for each individual package
-	pkgdir := filepath.Join(home, ".local", "stowy", "root")
+	stowyDir := filepath.Join(home, ".local", "stowy")
+	if e := os.MkdirAll(stowyDir, 0o700); e != nil {
+		return fmt.Errorf("I/O: could not create Stowy directory %s: %w", stowyDir, e)
+	}
+	workDir, e := os.MkdirTemp(stowyDir, ".install-*")
+	if e != nil {
+		return fmt.Errorf("I/O: create install staging directory: %w", e)
+	}
+	defer os.RemoveAll(workDir)
+	pkgdir := filepath.Join(workDir, "root")
+	if e := os.MkdirAll(pkgdir, 0o755); e != nil {
+		return fmt.Errorf("I/O: could not create staging root %s: %w", pkgdir, e)
+	}
+	root := filepath.Join(stowyDir, "root")
 	//	logStep("extract", "extracting package archive %s", archpath)
 	//	logStep("extract", "writing package files to %s", pkgdir)
 
@@ -141,20 +158,8 @@ func Expkg(pkgname, archpath string) error {
 					return fmt.Errorf("I/O: create symlink %q: %w", lp, e)
 				}
 			}
-			for _, name := range regularFiles {
-				rewritten, err := rewriteAbsoluteELFNeededPaths(filepath.Join(pkgdir, name), pkgdir)
-				if err != nil {
-					return fmt.Errorf("I/O: normalize ELF dependencies in %q: %w", name, err)
-				}
-				if rewritten > 0 {
-					logStep("relocate", "rewrote %d absolute ELF dependency path(s) in %s", rewritten, name)
-				}
-			}
-			if e := writeManifest(home, pkgname, files, dirs); e != nil {
-				return fmt.Errorf("I/O: could not record installed package %q: %w", pkgname, e)
-			}
-			if e := expose(pkgdir); e != nil {
-				return fmt.Errorf("I/O: could not correctly expose to path\nSTDERR: %w\n", e)
+			if err := commitPackage(home, root, workDir, pkgname, version, dependencies, pkgdir, files, dirs, regularFiles); err != nil {
+				return fmt.Errorf("I/O: install package %q: %w", pkgname, err)
 			}
 			progress.finish()
 			logStep("done", "package extraction complete")
@@ -165,10 +170,8 @@ func Expkg(pkgname, archpath string) error {
 		}
 
 		// skip pkg meta
-		if hdr.Name == ".PKGINFO" {
-			// we already previously read package metadata seperately
+		if isPackageMetadataFile(hdr.Name) {
 			continue
-
 		}
 
 		if !filepath.IsLocal(hdr.Name) {
@@ -255,10 +258,21 @@ func Expkg(pkgname, archpath string) error {
 
 }
 
+func isPackageMetadataFile(name string) bool {
+	switch name {
+	case ".PKGINFO", ".BUILDINFO", ".MTREE", ".INSTALL":
+		return true
+	default:
+		return false
+	}
+}
+
 type packageManifest struct {
-	Package string   `json:"package"`
-	Files   []string `json:"files"`
-	Dirs    []string `json:"dirs"`
+	Package      string   `json:"package"`
+	Version      string   `json:"version,omitempty"`
+	Dependencies []string `json:"dependencies,omitempty"`
+	Files        []string `json:"files"`
+	Dirs         []string `json:"dirs"`
 }
 
 func validPackageName(pkg string) bool {
@@ -270,10 +284,34 @@ func manifestPath(home, pkg string) string {
 	return filepath.Join(home, ".local", "stowy", "installed", pkg+".json")
 }
 
-func writeManifest(home, pkg string, files, dirs []string) error {
+func IsInstalledVersion(pkg, version string) (bool, error) {
+	if !validPackageName(pkg) {
+		return false, fmt.Errorf("invalid package name %q", pkg)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false, fmt.Errorf("locate home directory: %w", err)
+	}
+	manifest, err := readManifest(manifestPath(home, pkg))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read package manifest %q: %w", pkg, err)
+	}
+	if manifest.Package != pkg {
+		return false, fmt.Errorf("package manifest %q contains mismatched package name %q", pkg, manifest.Package)
+	}
+	return manifest.Version == version, nil
+}
+
+func writeManifest(home, pkg, version string, dependencies, files, dirs []string) error {
 	sort.Strings(files)
 	sort.Strings(dirs)
-	data, err := json.Marshal(packageManifest{Package: pkg, Files: files, Dirs: dirs})
+	sort.Strings(dependencies)
+	data, err := json.Marshal(packageManifest{
+		Package: pkg, Version: version, Dependencies: dependencies, Files: files, Dirs: dirs,
+	})
 	if err != nil {
 		return err
 	}
@@ -300,40 +338,35 @@ func writeManifest(home, pkg string, files, dirs []string) error {
 	return os.Rename(temp.Name(), path)
 }
 
-func expose(pkgdir string) error {
+func expose(home, pkgdir string, files []string) error {
 	pkgbin := filepath.Join(pkgdir, "usr", "bin")
-	entries, e := os.ReadDir(pkgbin)
-	// this block is an absolute motherfucker
-	if os.IsNotExist(e) {
-		logStep("expose", "package has no usr/bin dir")
+	var entries []string
+	for _, file := range files {
+		if filepath.Dir(file) != filepath.Join("usr", "bin") {
+			continue
+		}
+		entries = append(entries, filepath.Base(file))
+	}
+	if len(entries) == 0 {
 		return nil
 	}
-	// do you  KNOW how many times i got  "could not bind to usr/bin?"
-	// burn in hell
-
-	if e != nil {
-
-		return fmt.Errorf("E: read pkg commands: %w", e)
-	}
-	home, _ := os.UserHomeDir()
 	userbin := filepath.Join(home, ".local", "bin")
-	if e := os.MkdirAll(userbin, 0o755); e != nil {
-		return fmt.Errorf("I/O: could not create cmd dir: %w", e)
+	if err := os.MkdirAll(userbin, 0o755); err != nil {
+		return fmt.Errorf("I/O: could not create cmd dir: %w", err)
 	}
 
 	//	logStep("link", "creating command links in %s", userbin)
-	for _, i := range entries {
-		src := filepath.Join(pkgbin, i.Name())
-		info, e := os.Stat(src)
-		if e != nil {
-			return fmt.Errorf("E: failed to find %q: %v\n", src, e)
+	for _, name := range entries {
+		src := filepath.Join(pkgbin, name)
+		info, err := os.Stat(src)
+		if err != nil {
+			return fmt.Errorf("E: failed to find %q: %v\n", src, err)
 		}
-		if !info.Mode().IsRegular() ||
-			info.Mode().Perm()&0o111 == 0 {
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 			continue
 		}
-		link := filepath.Join(userbin, i.Name())
-		launcher := commandLauncher(i.Name())
+		link := filepath.Join(userbin, name)
+		launcher := commandLauncher(name)
 		existing, e := os.Lstat(link)
 		if e == nil {
 			if existing.Mode()&os.ModeSymlink != 0 {
@@ -352,7 +385,7 @@ func expose(pkgdir string) error {
 				if string(data) == launcher {
 					continue
 				}
-				if !isManagedCommandLauncher(i.Name(), string(data)) {
+				if !isManagedCommandLauncher(name, string(data)) {
 					return fmt.Errorf("E: %s already exists", link)
 				}
 			} else {
@@ -389,7 +422,7 @@ func expose(pkgdir string) error {
 }
 
 func commandLauncher(command string) string {
-	return commandLauncherVersion(command, true, true)
+	return stowyruntime.Launcher(command)
 }
 
 func commandLauncherVersion(command string, includePerlModules, searchLibrarySubdirectories bool) string {

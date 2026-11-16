@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	extract "stowy/install"
+	stowyruntime "stowy/internal/runtime"
 	"stowy/internal/statusline"
 	"stowy/meta"
 )
@@ -32,6 +36,10 @@ func main() {
 
 // The command body returns an exit code; main exits only after it has finished printing.
 func run() (exitCode int) {
+	if len(os.Args) > 1 && os.Args[1] == "run" {
+		return runInstalledProgram(os.Args[2:])
+	}
+
 	// Run logs and progress in the shared terminal UI when attached to a terminal.
 	if err := statusline.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "E: initialize terminal UI: %v\n", err)
@@ -48,7 +56,11 @@ func run() (exitCode int) {
 
 	// this motherfucker gets to be the first line because it  pissed  me off
 
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		statusline.LogfTo(os.Stderr, "E: locate home directory: %v", err)
+		return 1
+	}
 	paths := Paths{
 		Bin:   filepath.Join(home, ".local", "stowy", "usr", "bin"),
 		Lib:   filepath.Join(home, ".local", "stowy", "usr", "lib"),
@@ -90,10 +102,20 @@ func run() (exitCode int) {
 	//		os.Exit(1)
 	//	}
 	if len(os.Args) < 2 {
-		statusline.LogfTo(os.Stderr, "E: usage: stowy <search|install|local|uninstall> ...")
+		statusline.LogfTo(os.Stderr, "E: usage: stowy <search|install|local|uninstall|run|doctor> ...")
 		return 2
 	}
 	switch os.Args[1] {
+	case "doctor":
+		target, targetErr := detectPackageTarget()
+		env := make(map[string]string)
+		for _, entry := range os.Environ() {
+			key, value, ok := strings.Cut(entry, "=")
+			if ok {
+				env[key] = value
+			}
+		}
+		writeDoctorReport(os.Stdout, env, "/dev", target, targetErr)
 	case "s":
 		if len(os.Args) != 4 {
 			statusline.LogfTo(os.Stderr, "E: usage (S): stowy S <repo> <term>")
@@ -111,11 +133,8 @@ func run() (exitCode int) {
 		}
 		warnInsecureARMSource(target)
 		term := os.Args[3]
-		dburl := target.repositoryDatabaseURL(repo)
-		dbpath := repodbpath(repo, target.packageArch)
-
-		ls("repo", "downloading %s database", repo)
-		if err := dlfile(context.Background(), dburl, dbpath); err != nil {
+		dbpath, err := repoDatabase(repo, target)
+		if err != nil {
 			statusline.LogfTo(os.Stderr, "E: downloading repo db (%s): %v", repo, err)
 			return 1
 		}
@@ -223,8 +242,24 @@ func run() (exitCode int) {
 
 		lS("installed %s", pkg.Name)
 	default:
-		statusline.LogfTo(os.Stderr, "E: unknown cmd: %q\nusage: stowy <search|install|local|uninstall> ...", os.Args[1])
+		statusline.LogfTo(os.Stderr, "E: unknown cmd: %q\nusage: stowy <search|install|local|uninstall|run|doctor> ...", os.Args[1])
 		return 2
+	}
+	return 0
+}
+
+func runInstalledProgram(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "E: usage: stowy run <program> [args...]")
+		return 2
+	}
+	if err := stowyruntime.Run(args[0], args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode()
+		}
+		fmt.Fprintf(os.Stderr, "E: %v\n", err)
+		return 1
 	}
 	return 0
 }
@@ -311,14 +346,27 @@ func repoDatabase(repo string, target packageTarget) (string, error) {
 	if path, ok := loadedRepoDatabases[key]; ok {
 		return path, nil
 	}
-	url := target.repositoryDatabaseURL(repo)
 	path := repodbpath(repo, target.packageArch)
+	if repositoryDatabaseIsFresh(path, time.Now()) {
+		loadedRepoDatabases[key] = path
+		return path, nil
+	}
+	url := target.repositoryDatabaseURL(repo)
 	ls("repo", "downloading %s repository database", repo)
 	if err := dlfile(context.Background(), url, path); err != nil {
 		return "", err
 	}
 	loadedRepoDatabases[key] = path
 	return path, nil
+}
+
+func repositoryDatabaseIsFresh(path string, now time.Time) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	age := now.Sub(info.ModTime())
+	return age >= 0 && age < time.Hour
 }
 
 type installState struct {
@@ -339,6 +387,25 @@ func installPackage(pkg meta.Pkg, repo, archivePath string, state *installState,
 	}
 	if state.installing[pkg.Name] {
 		return fmt.Errorf("dependency cycle involving %q", pkg.Name)
+	}
+	installed, err := extract.IsInstalledVersion(pkg.Name, pkg.Ver)
+	if err != nil {
+		return fmt.Errorf("check installed package %q: %w", pkg.Name, err)
+	}
+	if installed {
+		state.installing[pkg.Name] = true
+		defer delete(state.installing, pkg.Name)
+		for _, requirement := range pkg.Depends {
+			dependency, dependencyRepo, err := depends(requirement, target)
+			if err != nil {
+				return fmt.Errorf("resolve dependency %q of %s: %w", requirement, pkg.Name, err)
+			}
+			if err := installPackage(dependency, dependencyRepo, "", state, target); err != nil {
+				return fmt.Errorf("install dependency %q of %s: %w", requirement, pkg.Name, err)
+			}
+		}
+		state.installed[pkg.Name] = true
+		return nil
 	}
 	state.installing[pkg.Name] = true
 	defer delete(state.installing, pkg.Name)
@@ -380,7 +447,7 @@ func installPackage(pkg meta.Pkg, repo, archivePath string, state *installState,
 	}
 
 	ls("install", "installing %s %s", packageInfo.Name, packageInfo.Ver)
-	if err := extract.Expkg(packageInfo.Name, archivePath); err != nil {
+	if err := extract.ExpkgWithMetadata(packageInfo.Name, packageInfo.Ver, packageInfo.Depends, archivePath); err != nil {
 		return fmt.Errorf("extract package %s: %w", packageInfo.Name, err)
 	}
 	state.installed[pkg.Name] = true
