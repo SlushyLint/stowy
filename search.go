@@ -149,7 +149,12 @@ func lsdb(dbpath, query string) ([]meta.Pkg, error) {
 	defer gz.Close()
 
 	arch := tar.NewReader(gz)
-	var matches []meta.Pkg
+	type packageRecord struct {
+		pkg     meta.Pkg
+		hasDesc bool
+	}
+	records := make(map[string]*packageRecord)
+	var order []string
 	need := strings.ToLower(func() string {
 		name, _, _ := splitDependency(query)
 		return name
@@ -158,12 +163,34 @@ func lsdb(dbpath, query string) ([]meta.Pkg, error) {
 	for {
 		entry, err := arch.Next()
 		if errors.Is(err, io.EOF) {
+			var matches []meta.Pkg
+			for _, name := range order {
+				record := records[name]
+				pkg := record.pkg
+				if !record.hasDesc {
+					continue
+				}
+				if !strings.Contains(strings.ToLower(pkg.Name), need) &&
+					!strings.Contains(strings.ToLower(pkg.Desk), need) &&
+					!packageSatisfies(pkg, query) {
+					continue
+				}
+				matches = append(matches, pkg)
+			}
 			return matches, nil
 		}
 		if err != nil {
 			return nil, err
 		}
-		if !strings.HasSuffix(entry.Name, "/desc") {
+		var isDesc bool
+		var packageName string
+		switch {
+		case strings.HasSuffix(entry.Name, "/desc"):
+			isDesc = true
+			packageName = strings.TrimSuffix(entry.Name, "/desc")
+		case strings.HasSuffix(entry.Name, "/depends"):
+			packageName = strings.TrimSuffix(entry.Name, "/depends")
+		default:
 			continue
 		}
 
@@ -171,12 +198,30 @@ func lsdb(dbpath, query string) ([]meta.Pkg, error) {
 		if err != nil {
 			return nil, err
 		}
-		pkg := meta.Parsen(string(data))
-		if !strings.Contains(strings.ToLower(pkg.Name), need) &&
-			!strings.Contains(strings.ToLower(pkg.Desk), need) &&
-			!packageSatisfies(pkg, query) {
-			continue
+		record, ok := records[packageName]
+		if !ok {
+			record = &packageRecord{}
+			records[packageName] = record
+			order = append(order, packageName)
 		}
-		matches = append(matches, pkg)
+		parsed := meta.Parsen(string(data))
+		if parsed.Name != "" {
+			record.pkg.Name = parsed.Name
+		}
+		if parsed.Ver != "" {
+			record.pkg.Ver = parsed.Ver
+		}
+		if parsed.Desk != "" {
+			record.pkg.Desk = parsed.Desk
+		}
+		if parsed.Fname != "" {
+			record.pkg.Fname = parsed.Fname
+		}
+		if parsed.Archbtw != "" {
+			record.pkg.Archbtw = parsed.Archbtw
+		}
+		record.pkg.Depends = append(record.pkg.Depends, parsed.Depends...)
+		record.pkg.Provides = append(record.pkg.Provides, parsed.Provides...)
+		record.hasDesc = record.hasDesc || isDesc
 	}
 }

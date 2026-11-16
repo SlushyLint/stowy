@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -332,7 +333,7 @@ func expose(pkgdir string) error {
 				if target != src {
 					return fmt.Errorf("E: %s already exists", link)
 				}
-			} else if existing.Mode().IsRegular() && existing.Size() == int64(len(launcher)) {
+			} else if existing.Mode().IsRegular() {
 				data, readErr := os.ReadFile(link)
 				if readErr != nil {
 					return fmt.Errorf("I/O: could not inspect %s: %w", link, readErr)
@@ -340,7 +341,9 @@ func expose(pkgdir string) error {
 				if string(data) == launcher {
 					continue
 				}
-				return fmt.Errorf("E: %s already exists", link)
+				if string(data) != legacyCommandLauncher(i.Name()) {
+					return fmt.Errorf("E: %s already exists", link)
+				}
 			} else {
 				return fmt.Errorf("E: %s already exists", link)
 			}
@@ -375,10 +378,41 @@ func expose(pkgdir string) error {
 }
 
 func commandLauncher(command string) string {
+	launcher := "#!/bin/sh\n" +
+		"STOWY_ROOT=\"${HOME:?}/.local/stowy/root\"\n" +
+		"STOWY_BINARY=\"$STOWY_ROOT/usr/bin/\"" + shellQuote(command) + "\n"
+	if loader := dynamicLoaderName(); loader != "" {
+		launcher +=
+			"if [ \"$(od -An -N4 -tx1 \"$STOWY_BINARY\" 2>/dev/null | tr -d '[:space:]')\" = 7f454c46 ]; then\n" +
+				"  STOWY_LOADER=\"$STOWY_ROOT/usr/lib/" + loader + "\"\n" +
+				"  if [ ! -x \"$STOWY_LOADER\" ]; then\n" +
+				"    printf '%s\\n' 'stowy: bundled dynamic loader is missing' >&2\n" +
+				"    exit 127\n" +
+				"  fi\n" +
+				"  exec \"$STOWY_LOADER\" --library-path \"$STOWY_ROOT/usr/lib\" \"$STOWY_BINARY\" \"$@\"\n" +
+				"fi\n"
+	}
+	return launcher + "exec \"$STOWY_BINARY\" \"$@\"\n"
+}
+
+func legacyCommandLauncher(command string) string {
 	return "#!/bin/sh\n" +
 		"STOWY_ROOT=\"${HOME:?}/.local/stowy/root\"\n" +
 		"export LD_LIBRARY_PATH=\"$STOWY_ROOT/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\"\n" +
 		"exec \"$STOWY_ROOT/usr/bin/\"" + shellQuote(command) + " \"$@\"\n"
+}
+
+func dynamicLoaderName() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "ld-linux-x86-64.so.2"
+	case "arm64":
+		return "ld-linux-aarch64.so.1"
+	case "arm":
+		return "ld-linux-armhf.so.3"
+	default:
+		return ""
+	}
 }
 
 func shellQuote(value string) string {

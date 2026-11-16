@@ -46,7 +46,7 @@ func TestRemoveDeletesInstalledPackageFilesAndLinks(t *testing.T) {
 	}
 }
 
-func TestCommandLauncherUsesUserLocalLibraries(t *testing.T) {
+func TestCommandLauncherKeepsHostLibraryPathForScripts(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("LD_LIBRARY_PATH", "/existing")
@@ -70,9 +70,66 @@ func TestCommandLauncherUsesUserLocalLibraries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run command launcher: %v: %s", err, output)
 	}
-	expected := filepath.Join(home, ".local", "stowy", "root", "usr", "lib") + ":/existing\nhello\n"
+	expected := "/existing\nhello\n"
 	if string(output) != expected {
 		t.Fatalf("command output = %q, want %q", output, expected)
+	}
+}
+
+func TestCommandLauncherUsesBundledLoaderForELF(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("LD_LIBRARY_PATH", "/existing")
+	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
+	writeTestPackage(t, archive, map[string]string{"usr/bin/demo": "\x7fELF\x00demo"})
+	if err := Expkg("demo", archive); err != nil {
+		t.Fatal(err)
+	}
+
+	root := filepath.Join(home, ".local", "stowy", "root")
+	loader := filepath.Join(root, "usr", "lib", dynamicLoaderName())
+	if err := os.MkdirAll(filepath.Dir(loader), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	loaderScript := "#!/bin/sh\n" +
+		"if [ \"$1\" = --verify ]; then exit 0; fi\n" +
+		"printf '%s\\n' \"$LD_LIBRARY_PATH\" \"$1\" \"$2\" \"$3\" \"$4\"\n"
+	if err := os.WriteFile(loader, []byte(loaderScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	commandPath := filepath.Join(home, ".local", "bin", "demo")
+	command := exec.Command(commandPath, "hello")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run command launcher: %v: %s", err, output)
+	}
+	expected := "/existing\n--library-path\n" +
+		filepath.Join(root, "usr/lib") + "\n" +
+		filepath.Join(root, "usr/bin/demo") + "\nhello\n"
+	if string(output) != expected {
+		t.Fatalf("command output = %q, want %q", output, expected)
+	}
+}
+
+func TestExpkgReplacesLegacyCommandLauncher(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	archive := filepath.Join(t.TempDir(), "demo.pkg.tar.zst")
+	writeTestPackage(t, archive, map[string]string{"usr/bin/demo": "executable"})
+	commandPath := filepath.Join(home, ".local", "bin", "demo")
+	if err := os.MkdirAll(filepath.Dir(commandPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(commandPath, []byte(legacyCommandLauncher("demo")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Expkg("demo", archive); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(commandPath); err != nil || string(data) != commandLauncher("demo") {
+		t.Fatalf("command launcher = %q, %v", data, err)
 	}
 }
 

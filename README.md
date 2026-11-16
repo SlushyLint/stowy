@@ -36,9 +36,10 @@ userspace is required.
 does not verify signatures.** Network tampering could replace metadata or
 package contents. Do not install ARM packages over untrusted networks.
 
-Architecture selection does not guarantee compatibility with every
-glibc-based distribution. Packages may require a newer glibc or other host
-runtime facilities; Stowy does not provide an isolated runtime. See
+Exposed dynamically linked commands use the package set's glibc loader and
+libraries, avoiding mixing them with the host's glibc. This is not a complete
+runtime isolation: packages may still require host kernel features or other
+host facilities. See
 [platform-support.md](./docs/platform-support.md) for details.
 
 Stowy is a prototype, not a hardened package-management workflow. Review the
